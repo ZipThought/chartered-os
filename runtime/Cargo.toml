@@ -1,0 +1,13 @@
+[package]
+name = "chartered"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "chartered"
+path = "src/main.rs"
+
+[dependencies]
+libseccomp = "0.3"
+libc = "0.2"
+nix = { version = "0.29", features = ["process", "socket", "uio"] }

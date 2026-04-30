@@ -1,0 +1,31 @@
+syntax = "proto3";
+package chartered.v1;
+
+import "google/protobuf/timestamp.proto";
+
+// File system event observed by the runtime's subprocess-containment
+// helper while a subprocess dispatched by an exec-shaped tool runs.
+// These events are recorded as child receipts (see receipt.proto >
+// ChildReceipt) joined to the originating tool-call receipt.
+//
+// FileEvent captures the file-system view; lower-level syscall events go
+// into ChildReceipt directly. FileEvent exists for path-coalescing across
+// multiple syscalls that affect the same path (e.g. open + write + close
+// resolved to one MODIFIED event).
+message FileEvent {
+  string path = 1;
+  FileAction action = 2;
+  string parent_receipt_id = 3; // joins to the tool-call Receipt that dispatched this subprocess
+  google.protobuf.Timestamp timestamp = 4;
+  uint64 size_bytes = 5;        // file size after event, 0 for delete
+  string hash = 6;              // content hash, empty if unavailable
+
+  enum FileAction {
+    ACTION_UNSPECIFIED = 0;
+    CREATED = 1;
+    MODIFIED = 2;
+    DELETED = 3;
+    RENAMED = 4;
+    PERMISSIONS_CHANGED = 5;
+  }
+}

@@ -1,0 +1,49 @@
+syntax = "proto3";
+package chartered.v1;
+
+import "v1/tool_call.proto";
+import "v1/verdict.proto";
+import "v1/receipt.proto";
+
+// Runtime → Gate: evaluate a proposed tool call against the active
+// Charter instance.
+//
+// In a single-process deployment, the Gate is in-process and this message
+// shape is the in-memory call. In a Runtime/Daemon-split deployment where
+// Frames reference adapter-fronted evaluators, the same shape is used
+// over the wire to the Daemon (which coordinates with Adapter peers).
+message EvaluateRequest {
+  ToolCall tool_call = 1;
+  string policy_id = 2;         // which Charter instance to evaluate against
+  string source_id = 3;         // which Steward (for Receipt attribution)
+}
+
+// Gate → Runtime: evaluation result.
+//
+// Verdicts include each Frame's within-Frame evaluator trace.
+// `outcome` is the conjunction across Frames. `feedback` is the
+// Frame-id + reason concatenation surfaced to the Steward on denial
+// (no evaluator internals, no Scope text — minimum signal for
+// refinement, smallest attack surface).
+message EvaluateResponse {
+  repeated Verdict verdicts = 1;
+  Outcome outcome = 2;
+  string feedback = 3;          // frame_id: reason for each violating Frame
+}
+
+// Runtime → Daemon: post-evaluation receipt submission. The Runtime's
+// Gate produces the Verdict locally; this message carries the resulting
+// Receipt to the Daemon's store. Used in Runtime/Daemon-split deployments
+// (single-process deployments persist directly to the embedded store).
+message SubmitReceipt {
+  Receipt receipt = 1;
+  repeated ChildReceipt child_receipts = 2; // joined subprocess-containment events, if any
+}
+
+// Daemon → Runtime: ack. `accepted=false` indicates the Daemon could not
+// persist (disk full, schema mismatch, access denied); the Runtime falls
+// back to local file storage and retries on reconnection.
+message SubmitReceiptAck {
+  bool accepted = 1;
+  string error = 2;             // populated when accepted=false
+}

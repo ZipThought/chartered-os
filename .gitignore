@@ -1,0 +1,28 @@
+# Build artifacts
+target/
+*.swp
+*.swo
+*~
+
+# IDE
+.idea/
+.vscode/
+*.iml
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Chartered runtime data (user-specific, not committed)
+.chartered/receipts/
+.chartered/chartered.toml
+
+# Tooling/session state (Claude Code skills/hooks)
+.remember/
+
+# Session-scoped intermediate files (per AGENTS.md > Appendix: Intermediate Files).
+# Ephemeral working artifacts; MUST NOT be committed or serve as primary spec.
+temp/
+
+# repomix bundling output — regenerable from source, not committed.
+repomix-output.xml

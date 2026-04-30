@@ -1,0 +1,42 @@
+# Deterministic rules for governing coding agents.
+# These evaluate in microseconds — no LLM, no network.
+
+[[deny_patterns]]
+id = "no_rm_rf"
+pattern = "rm -rf *"
+reason = "recursive forced deletion requires explicit confirmation"
+
+[[deny_patterns]]
+id = "no_production_rm"
+pattern = "*production*rm*"
+reason = "destructive operation on production path"
+
+[[deny_patterns]]
+id = "no_sudo"
+pattern = "sudo *"
+reason = "privilege escalation not permitted in governed shell"
+
+[[deny_patterns]]
+id = "no_chmod_777"
+pattern = "*chmod 777*"
+reason = "world-writable permissions not permitted"
+
+[[deny_patterns]]
+id = "no_etc_passwd"
+pattern = "*cat */etc/passwd*"
+reason = "access to system credential files not permitted"
+
+[[deny_patterns]]
+id = "no_env_dump"
+pattern = "*env*|*grep*KEY*"
+reason = "credential extraction via environment not permitted"
+
+[[deny_patterns]]
+id = "no_curl_pipe_sh"
+pattern = "*curl*|*sh*"
+reason = "piping remote content to shell not permitted"
+
+[[deny_patterns]]
+id = "no_git_force_push"
+pattern = "git push*--force*"
+reason = "force push requires explicit confirmation"

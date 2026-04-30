@@ -1,0 +1,22 @@
+syntax = "proto3";
+package chartered.v1;
+
+import "google/protobuf/timestamp.proto";
+
+// The universal primitive: every Steward action reduces to this. ToolCalls
+// are produced by the Steward's propose step, expressed in the runtime's
+// typed Tool vocabulary, and submitted to the Gate for evaluation before
+// any effect.
+//
+// `tool_name` identifies a registered Tool (e.g. "send_message",
+// "read_file", "write_file", "query_db", "http_request", "exec_command").
+// `tool_params` is the Tool's typed parameter shape, serialized per the
+// Tool's registry entry; the Frames that gate this Tool are written
+// against the typed shape, not against bytes.
+message ToolCall {
+  string tool_name = 1;         // registered Tool identifier
+  bytes tool_params = 2;        // typed shape per Tool registry; serialized
+  string context_id = 3;        // session / conversation / task identifier
+  string source_id = 4;         // which Steward
+  google.protobuf.Timestamp timestamp = 5;
+}

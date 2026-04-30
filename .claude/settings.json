@@ -1,0 +1,18 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "if": "Bash(*git*commit*)",
+            "timeout": 120,
+            "statusMessage": "Governance audit: evaluating commit against engineering law...",
+            "command": "node \"$(git rev-parse --show-toplevel)/.claude/hooks/pre-commit-audit.mjs\""
+          }
+        ]
+      }
+    ]
+  }
+}

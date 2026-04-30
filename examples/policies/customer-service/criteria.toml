@@ -1,0 +1,20 @@
+# Frame definitions for customer-service governance.
+# Each Frame references Charter Scopes from policy.md.
+
+[[frames]]
+id = "pricing_accuracy"
+concern = "All prices, fees, delivery costs, and warranty extension costs stated in the response match the pricing schedule exactly. No invented discounts or promotions."
+declared_scopes = ["product_pricing_fees"]
+type = "deterministic"
+
+[[frames]]
+id = "returns_warranty_compliance"
+concern = "Return and warranty policy is applied correctly to the customer's specific situation — correct eligibility, correct process, correct timeframes, no exceptions not in policy."
+declared_scopes = ["returns_warranty_policy"]
+type = "judgment"
+
+[[frames]]
+id = "scope_adherence"
+concern = "Response stays within defined service scope — does not provide troubleshooting, repair advice, installation guidance, policy overrides, competitor comparisons, or personal product opinions."
+declared_scopes = ["service_scope_limitations"]
+type = "judgment"

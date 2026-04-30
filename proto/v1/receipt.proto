@@ -1,0 +1,84 @@
+syntax = "proto3";
+package chartered.v1;
+
+import "google/protobuf/timestamp.proto";
+import "v1/tool_call.proto";
+import "v1/verdict.proto";
+
+// Governance decision Outcome at the Receipt level.
+//
+// Distinct from `EvaluatorEntry.Decision` in verdict.proto:
+//   - Receipt-level `Outcome` is the conjunction over per-Frame Verdicts
+//     (the Steward-facing decision).
+//   - EvaluatorEntry-level `Decision` is one evaluator's contribution
+//     to a single Frame's chain (a chain-step decision).
+//
+// PASSTHROUGH at this level (an Outcome) means no evaluation was performed
+// — the tool call was Receipted and executed without gating, typical under
+// `passthrough` enforcement. This is *different* from the chain-step
+// concept of "defer to next evaluator" (which is `Decision.DEFER` in
+// verdict.proto, deliberately renamed to avoid shadowing this token).
+enum Outcome {
+  OUTCOME_UNSPECIFIED = 0;
+  ALLOWED = 1;     // evaluated, all Frames GROUNDED
+  DENIED = 2;      // evaluated, at least one Frame UNGROUNDED
+  ESCALATED = 3;   // refinement budget exhausted
+  PASSTHROUGH = 4; // not evaluated — receipt-only mode (passthrough enforcement)
+}
+
+// Enforcement level under which a Receipt was produced. Defined as an
+// enum (rather than a free-form string) so unknown values are forward-
+// compatible by ordinal but typed at the boundary.
+enum EnforcementLevel {
+  ENFORCEMENT_LEVEL_UNSPECIFIED = 0;
+  PASSTHROUGH_LEVEL = 1; // Receipt every tool call, never deny
+  RULES_LEVEL = 2;       // deterministic-matcher evaluators enforce; LLM advisory
+  FULL_LEVEL = 3;        // every evaluator enforces; default-deny on chain exhaustion
+}
+
+// The canonical governance record. Written before effect. Tool-call
+// granularity: one Receipt per Steward-proposed tool call. Subprocess-
+// containment events from descendants of an exec-shaped Tool's spawned
+// process are recorded as separate child Receipts joined by
+// `parent_receipt_id` (see ChildReceipt below).
+message Receipt {
+  string receipt_id = 1;
+  ToolCall tool_call = 2;
+  repeated Verdict verdicts = 3;            // one per applicable Frame; empty under PASSTHROUGH outcome
+  Outcome outcome = 4;
+  google.protobuf.Timestamp timestamp = 5;
+  Metrics metrics = 6;                      // wall-clock end-to-end; per-evaluator metrics live in EvaluatorEntry
+  EnforcementLevel enforcement_level = 7;
+  // Honesty flag: true when every applicable Frame produced a
+  // parseable Verdict; false when an evaluator timed out, an LLM was
+  // unreachable, the durability layer degraded, or any partial-coverage
+  // condition was tolerated.
+  bool intercept_complete = 8;
+  // Which surface produced this Receipt. For a Steward's tool call, this
+  // is the Runtime's identifier (e.g. "runtime:medical-reception"). For
+  // an adapter-fronted evaluator's contribution, the Adapter's identifier
+  // appears in the Verdict's evaluator_trace.
+  string adapter_id = 9;
+  // Charter version active at evaluation time.
+  uint64 charter_version = 10;
+  // Role context version active at evaluation time.
+  uint64 role_context_version = 11;
+  // Snapshot identifier — the frozen Charter instance + Role context
+  // bundle this Task evaluates against.
+  string snapshot_id = 12;
+}
+
+// Subprocess-containment event recorded by the Runtime's containment
+// helper when an exec-shaped Tool dispatches a subprocess. Joined to the
+// parent Receipt via `parent_receipt_id`. The audit primary is the parent
+// (tool-call-level) Receipt; ChildReceipts are the audit detail.
+message ChildReceipt {
+  string child_receipt_id = 1;
+  string parent_receipt_id = 2;             // joins to the originating Receipt
+  google.protobuf.Timestamp timestamp = 3;
+  uint32 pid = 4;                           // subprocess pid (or descendant tid)
+  string syscall = 5;                       // intercepted syscall name (e.g. "openat")
+  string decoded_args = 6;                  // human-readable decoded argument summary
+  bool denied = 7;                          // true if the Runtime denied the syscall (deterministic rule); false if observed only
+  bool intercept_complete = 8;              // false if a containment gap applied (see SPECIFICATION > Honest Gap Inventory)
+}
