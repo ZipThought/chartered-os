@@ -1,0 +1,2 @@
+id = "list_artifacts"
+executor = "native_artifact_list"

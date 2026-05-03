@@ -1,6 +1,6 @@
 #!/bin/bash
-# CI sanity checks — single source of truth for cargo check, clippy, test.
-# Called by: .github/workflows/ci.yml and .claude/hooks/pre-commit-audit.mjs
+# CI sanity checks — single source of truth for clippy + test.
+# Called by: .github/workflows/ci.yml and .claude/hooks/pre-commit-gate.mjs
 #
 # Each Rust crate is its own self-contained project under its own
 # subdirectory; there is no workspace at the repository root.
@@ -24,8 +24,8 @@ if [ ${#CRATES[@]} -eq 0 ]; then
 fi
 
 for crate in "${CRATES[@]}"; do
-    echo "=== $crate: cargo check ==="
-    (cd "$crate" && cargo check)
+    # `cargo clippy` is a strict superset of `cargo check`; running
+    # both would do the type-check pass twice per crate.
     echo "=== $crate: cargo clippy ==="
     (cd "$crate" && cargo clippy -- -D warnings)
     echo "=== $crate: cargo test ==="

@@ -1,0 +1,3 @@
+id = "write_file"
+executor = "native_fs_write"
+description = "Write content to a file within the operator's authorized scope."

@@ -1,0 +1,34 @@
+# Charter: customer-service
+# Spec §Reference Charters; loaded by core::charter_loader::load_charter_def.
+#
+# All declared scopes here are RoleContext: the operator supplies the
+# pricing schedule, returns/warranty policy, and service scope as
+# practice-specific facts via role_context.md (see scopes.md in this
+# directory for the reference template). Per spec §Role Context the
+# Evaluator must treat these as quoted evidence, not instruction.
+
+permitted_tools = ["send_message"]
+
+[[frames]]
+id = "pricing_accuracy"
+concern = "All prices, fees, delivery costs, and warranty extension costs stated in the response match the pricing schedule exactly. No invented discounts or promotions."
+applies_to_tools = ["send_message"]
+declared_scopes = [
+  { name = "product_pricing_fees", kind = "RoleContext" },
+]
+
+[[frames]]
+id = "returns_warranty_compliance"
+concern = "Return and warranty policy is applied correctly to the customer's specific situation — correct eligibility, correct process, correct timeframes, no exceptions not in policy."
+applies_to_tools = ["send_message"]
+declared_scopes = [
+  { name = "returns_warranty_policy", kind = "RoleContext" },
+]
+
+[[frames]]
+id = "scope_adherence"
+concern = "Response stays within defined service scope — does not provide troubleshooting, repair advice, installation guidance, policy overrides, competitor comparisons, or personal product opinions."
+applies_to_tools = ["send_message"]
+declared_scopes = [
+  { name = "service_scope_limitations", kind = "RoleContext" },
+]

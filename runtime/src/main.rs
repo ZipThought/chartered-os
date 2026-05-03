@@ -1,181 +1,183 @@
-// chartered: runtime that intercepts syscalls of an agent process and writes
-// each one to a log. Passthrough only — observe and continue, no policy,
-// no daemon, no protobuf receipts. KISS first cut.
-//
-// Usage: chartered <cmd> [args...]
-//   CHARTERED_LOG=path overrides the default log path (./chartered.log).
+//! CharteredOS Runtime binary. Per-deployment process from spec §The
+//! Runtime. ONE invocation, ONE code path.
+//!
+//!     chartered-runtime [--chartered-dir <dir>]
+//!                       [--workspace-root <dir>]
+//!                       [--user-message <text>]
+//!                       [--refinement-budget <n>]
+//!
+//! `.chartered/` walk-up resolves config; `steward.toml` selects per-role
+//! backends (fake or real). A test deployment differs from a production
+//! deployment only in the `backend` value — every code path the binary
+//! runs is identical for both.
 
-mod decode;
+use std::path::PathBuf;
 
-use std::env;
-use std::ffi::CString;
-use std::fs::{File, OpenOptions};
-use std::io::{IoSlice, IoSliceMut, Write};
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
-use std::process::exit;
-use std::time::{SystemTime, UNIX_EPOCH};
+use chartered_core::{ArtifactId, ArtifactRange, SelectionAction, SelectionActionKind};
+use chartered_runtime::run;
 
-use libseccomp::{
-    ScmpAction, ScmpArch, ScmpFilterContext, ScmpNotifReq, ScmpNotifResp, ScmpNotifRespFlags,
-    ScmpSyscall,
-};
-use nix::cmsg_space;
-use nix::sys::socket::{
-    recvmsg, sendmsg, socketpair, AddressFamily, ControlMessage, ControlMessageOwned,
-    MsgFlags, SockFlag, SockType,
-};
-use nix::sys::wait::{waitpid, WaitStatus};
-use nix::unistd::{execvp, fork, ForkResult, Pid};
+#[tokio::main]
+async fn main() {
+    // Process env wins; `.env` fills gaps. Walked from CWD upward.
+    let _ = dotenvy::dotenv();
 
-const INTERCEPT: &[&str] = &[
-    "execve", "execveat", "openat", "connect", "unlinkat", "renameat2",
-];
-
-fn main() {
-    let argv: Vec<String> = env::args().collect();
-    if argv.len() < 2 {
-        eprintln!("usage: chartered <cmd> [args...]");
-        exit(64);
-    }
-    let cmd_argv: Vec<CString> = argv[1..]
-        .iter()
-        .map(|s| CString::new(s.as_str()).expect("argv contains NUL"))
-        .collect();
-
-    let log_path = env::var("CHARTERED_LOG").unwrap_or_else(|_| "chartered.log".to_string());
-
-    let (parent_sock, child_sock) = socketpair(
-        AddressFamily::Unix,
-        SockType::Stream,
-        None,
-        SockFlag::empty(),
-    )
-    .expect("socketpair");
-
-    match unsafe { fork() }.expect("fork") {
-        ForkResult::Parent { child } => {
-            drop(child_sock);
-            run_supervisor(parent_sock, child, &log_path);
-        }
-        ForkResult::Child => {
-            drop(parent_sock);
-            run_child(child_sock, &cmd_argv);
-        }
+    let args: Vec<String> = std::env::args().collect();
+    if let Err(e) = dispatch(&args).await {
+        eprintln!("chartered-runtime: {e}");
+        std::process::exit(1);
     }
 }
 
-fn run_child(sock: OwnedFd, argv: &[CString]) -> ! {
-    // PR_SET_NO_NEW_PRIVS is required for an unprivileged process to install
-    // a seccomp filter, and prevents descendants from gaining privileges
-    // through suid that would let them shed the filter.
-    unsafe {
-        if libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0 {
-            eprintln!("chartered: PR_SET_NO_NEW_PRIVS failed");
-            exit(1);
-        }
-    }
-
-    let mut filter = ScmpFilterContext::new_filter(ScmpAction::Allow).expect("seccomp filter");
-    filter.add_arch(ScmpArch::Native).ok();
-    for name in INTERCEPT {
-        if let Ok(sc) = ScmpSyscall::from_name(name) {
-            filter
-                .add_rule(ScmpAction::Notify, sc)
-                .expect("add_rule");
-        }
-    }
-    filter.load().expect("seccomp load");
-
-    let raw_fd: RawFd = filter.get_notify_fd().expect("notify_fd");
-    let notify_fd: OwnedFd = unsafe { OwnedFd::from_raw_fd(raw_fd) };
-
-    // Send the notify_fd to the supervisor over the socketpair.
-    let buf = [0u8];
-    let iov = [IoSlice::new(&buf)];
-    let cmsg = [ControlMessage::ScmRights(&[notify_fd.as_raw_fd()])];
-    sendmsg::<()>(sock.as_raw_fd(), &iov, &cmsg, MsgFlags::empty(), None).expect("sendmsg");
-
-    drop(notify_fd);
-    drop(sock);
-
-    let prog = &argv[0];
-    let _ = execvp(prog, argv);
-    eprintln!("chartered: execvp({:?}) failed", prog);
-    exit(127);
-}
-
-fn run_supervisor(sock: OwnedFd, child: Pid, log_path: &str) -> ! {
-    let mut buf = [0u8; 1];
-    let mut iov = [IoSliceMut::new(&mut buf)];
-    let mut cmsg_buf = cmsg_space!([RawFd; 1]);
-    let msg = recvmsg::<()>(
-        sock.as_raw_fd(),
-        &mut iov,
-        Some(&mut cmsg_buf),
-        MsgFlags::empty(),
-    )
-    .expect("recvmsg");
-
-    let mut notify_fd: Option<RawFd> = None;
-    for cm in msg.cmsgs().expect("cmsgs") {
-        if let ControlMessageOwned::ScmRights(fds) = cm {
-            if let Some(&fd) = fds.first() {
-                notify_fd = Some(fd);
+async fn dispatch(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    let mut opts = run::Options::default();
+    let mut selection = SelectionArgs::default();
+    let mut i = 1;
+    while i < args.len() {
+        let arg = &args[i];
+        let value = || -> Result<&String, Box<dyn std::error::Error>> {
+            args.get(i + 1)
+                .ok_or_else(|| format!("missing value for {arg}").into())
+        };
+        match arg.as_str() {
+            "--user-message" => {
+                opts.user_message = Some(value()?.clone());
+                i += 2;
             }
+            "--chartered-dir" => {
+                opts.chartered_dir = Some(PathBuf::from(value()?));
+                i += 2;
+            }
+            "--workspace-root" => {
+                opts.workspace_root = Some(PathBuf::from(value()?));
+                i += 2;
+            }
+            "--refinement-budget" => {
+                opts.refinement_budget = Some(
+                    value()?
+                        .parse::<usize>()
+                        .map_err(|e| format!("--refinement-budget: {e}"))?,
+                );
+                i += 2;
+            }
+            "--selection-artifact" => {
+                selection.artifact_id = Some(value()?.clone());
+                i += 2;
+            }
+            "--selection-start" => {
+                selection.start = Some(
+                    value()?
+                        .parse::<usize>()
+                        .map_err(|e| format!("--selection-start: {e}"))?,
+                );
+                i += 2;
+            }
+            "--selection-end" => {
+                selection.end = Some(
+                    value()?
+                        .parse::<usize>()
+                        .map_err(|e| format!("--selection-end: {e}"))?,
+                );
+                i += 2;
+            }
+            "--selection-start-line" => {
+                selection.start_line = Some(
+                    value()?
+                        .parse::<usize>()
+                        .map_err(|e| format!("--selection-start-line: {e}"))?,
+                );
+                i += 2;
+            }
+            "--selection-end-line" => {
+                selection.end_line = Some(
+                    value()?
+                        .parse::<usize>()
+                        .map_err(|e| format!("--selection-end-line: {e}"))?,
+                );
+                i += 2;
+            }
+            "--selection-action" => {
+                selection.action = Some(value()?.clone());
+                i += 2;
+            }
+            "--selection-kind" => {
+                selection.kind = Some(parse_selection_kind(value()?)?);
+                i += 2;
+            }
+            "--help" | "-h" => {
+                usage();
+                return Ok(());
+            }
+            other => return Err(format!("unknown argument: {other}").into()),
         }
     }
-    let notify_fd = notify_fd.expect("supervisor did not receive notify_fd");
+    opts.selection_trigger = selection.finish()?;
+    run::run(opts).await
+}
 
-    let log = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(log_path)
-        .expect("open log");
+#[derive(Default)]
+struct SelectionArgs {
+    artifact_id: Option<String>,
+    start: Option<usize>,
+    end: Option<usize>,
+    start_line: Option<usize>,
+    end_line: Option<usize>,
+    action: Option<String>,
+    kind: Option<SelectionActionKind>,
+}
 
-    // Drain notifications on a thread; the main thread waits for the child.
-    let log_thread = std::thread::spawn(move || {
-        let mut log = log;
-        loop {
-            if poll_one(notify_fd, &mut log).is_err() {
-                break;
-            }
+impl SelectionArgs {
+    fn finish(self) -> Result<Option<run::SelectionTriggerOptions>, Box<dyn std::error::Error>> {
+        let any = self.artifact_id.is_some()
+            || self.start.is_some()
+            || self.end.is_some()
+            || self.start_line.is_some()
+            || self.end_line.is_some()
+            || self.action.is_some()
+            || self.kind.is_some();
+        if !any {
+            return Ok(None);
         }
-    });
-
-    let status = waitpid(child, None).expect("waitpid");
-    // The child exiting closes the kernel's listener; the next ScmpNotifReq::receive
-    // returns an error and the polling thread exits.
-    let _ = log_thread.join();
-
-    match status {
-        WaitStatus::Exited(_, code) => exit(code),
-        WaitStatus::Signaled(_, sig, _) => exit(128 + sig as i32),
-        _ => exit(1),
+        Ok(Some(run::SelectionTriggerOptions {
+            artifact_id: ArtifactId::new(self.artifact_id.ok_or("missing --selection-artifact")?),
+            range: ArtifactRange {
+                start: self.start.ok_or("missing --selection-start")?,
+                end: self.end.ok_or("missing --selection-end")?,
+                start_line: self.start_line.ok_or("missing --selection-start-line")?,
+                end_line: self.end_line.ok_or("missing --selection-end-line")?,
+            },
+            action: SelectionAction {
+                name: self.action.ok_or("missing --selection-action")?,
+                kind: self.kind.ok_or("missing --selection-kind")?,
+            },
+        }))
     }
 }
 
-fn poll_one(notify_fd: RawFd, log: &mut File) -> Result<(), ()> {
-    let req = ScmpNotifReq::receive(notify_fd).map_err(|_| ())?;
-    let syscall_name = req
-        .data
-        .syscall
-        .get_name()
-        .unwrap_or_else(|_| format!("syscall_{}", i32::from(req.data.syscall)));
-    let ts = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis())
-        .unwrap_or(0);
-    let args_json = decode::decode(req.pid, &syscall_name, &req.data.args);
-    let line = format!(
-        "{{\"ts_ms\":{ts},\"pid\":{pid},\"syscall\":\"{syscall_name}\",\"args\":{args_json}}}\n",
-        pid = req.pid,
+fn parse_selection_kind(s: &str) -> Result<SelectionActionKind, Box<dyn std::error::Error>> {
+    match s {
+        "generative" => Ok(SelectionActionKind::Generative),
+        "evaluative" => Ok(SelectionActionKind::Evaluative),
+        other => {
+            Err(format!("--selection-kind must be generative or evaluative, got `{other}`").into())
+        }
+    }
+}
+
+fn usage() {
+    eprintln!("usage: chartered-runtime [opts]");
+    eprintln!();
+    eprintln!("opts:");
+    eprintln!("  --chartered-dir <dir>          override walk-up search for .chartered/");
+    eprintln!("  --workspace-root <dir>         override default (parent of .chartered/)");
+    eprintln!(
+        "  --user-message <text>          single-task input; required unless [tester] in steward.toml"
     );
-    let _ = log.write_all(line.as_bytes());
-    let _ = log.flush();
-
-    // CONTINUE: kernel re-runs the syscall normally. Acceptable for
-    // passthrough logging; not safe for enforcement (TOCTOU on argv).
-    let resp = ScmpNotifResp::new(req.id, 0, 0, ScmpNotifRespFlags::CONTINUE.bits());
-    resp.respond(notify_fd).map_err(|_| ())?;
-    Ok(())
+    eprintln!("  --selection-artifact <id>      artifact path for selection trigger");
+    eprintln!("  --selection-start <n>          selection start byte offset");
+    eprintln!("  --selection-end <n>            selection end byte offset");
+    eprintln!("  --selection-start-line <n>     selection start line");
+    eprintln!("  --selection-end-line <n>       selection end line");
+    eprintln!("  --selection-action <name>      action label, e.g. Refine or Review");
+    eprintln!("  --selection-kind <kind>        generative or evaluative");
+    eprintln!("  --refinement-budget <n>        default: 3");
 }

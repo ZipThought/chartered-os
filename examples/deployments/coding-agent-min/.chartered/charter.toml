@@ -1,0 +1,5 @@
+# Charter reference and version. Spec §The Runtime.
+# `path` is resolved relative to this `.chartered/` directory.
+
+path = "../../../charters/coding-agent"
+version = 1
