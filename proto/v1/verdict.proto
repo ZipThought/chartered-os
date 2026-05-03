@@ -1,60 +1,41 @@
 syntax = "proto3";
 package chartered.v1;
 
-// The per-Frame decision produced by the Gate. Composed of a Ruling at
-// the Frame level and the within-Frame evaluator chain trace.
-//
-// One Verdict per applicable Frame. The conjunction across Frames
-// produces the Receipt's Outcome (in receipt.proto).
+// Per-Frame decision. See docs/SPECIFICATION.md > Frames.
 message Verdict {
-  string frame_id = 1;                         // which Frame this Verdict belongs to
-  Ruling ruling = 2;                           // Frame-level outcome
-  string reason = 3;                           // one sentence — surfaces to Steward on denial
-  repeated EvaluatorEntry evaluator_trace = 4; // within-Frame chain, in order
+  string frame_id = 1;
+  Ruling ruling = 2;
+  string reason = 3;                           // one sentence; surfaces to Steward on denial
+  repeated EvaluatorEntry evaluator_trace = 4;
 
   enum Ruling {
     RULING_UNSPECIFIED = 0;
-    GROUNDED = 1;                              // Frame satisfied
-    UNGROUNDED = 2;                            // Frame violated
-    UNCERTAIN = 3;                             // Frame applies but evaluation cannot reach a confident conclusion
-    OUT_OF_SCOPE = 4;                          // Frame's applicability conditions unmet for this proposal
+    GROUNDED = 1;
+    UNGROUNDED = 2;
+    UNCERTAIN = 3;
+    OUT_OF_SCOPE = 4;
   }
 }
 
-// One entry in a Frame's evaluator chain. Each evaluator that fires
-// produces one entry. The chain short-circuits on ALLOW or DENY (which
-// becomes the Frame's Ruling); DEFER yields to the next evaluator;
-// ESCALATE marks chain exhaustion (the Frame's Ruling becomes UNGROUNDED
-// under default-deny).
-//
-// Note: this enum's values intentionally do not include a value named
-// `PASSTHROUGH` — that token is reserved at the receipt level (see
-// `Outcome.PASSTHROUGH` in receipt.proto, which means "not evaluated"). At
-// the within-Frame-chain level, the equivalent concept is `DEFER`
-// (this evaluator could not decide; pass to the next in the chain).
 message EvaluatorEntry {
-  string evaluator_id = 1;                     // which evaluator produced this entry
-  Decision decision = 2;                       // chain-level decision
-  string observation = 3;                      // optional finding (often attached to DEFER)
-  Metrics metrics = 4;                         // per-evaluator instrumentation
+  string evaluator_id = 1;
+  Decision decision = 2;
+  string observation = 3;
+  Metrics metrics = 4;
 
+  // DEFER ≠ Outcome.PASSTHROUGH (receipt.proto). DEFER = chain-step "next evaluator"; PASSTHROUGH = "not evaluated".
   enum Decision {
     DECISION_UNSPECIFIED = 0;
-    ALLOW = 1;                                 // evaluator confidently affirms Frame (or vacuously: not applicable)
-    DENY = 2;                                  // evaluator confidently denies Frame
-    ESCALATE = 3;                              // evaluator cannot decide; chain exhausted
-    DEFER = 4;                                 // evaluator cannot decide; defer to next in chain
+    ALLOW = 1;                                 // confidently affirms Frame (or vacuously: not applicable)
+    DENY = 2;
+    ESCALATE = 3;                              // chain exhausted
+    DEFER = 4;
   }
 }
 
-// Instrumentation captured per evaluator firing or per Tool execution.
-// Lives with Verdict because evaluator-instrumentation is the dominant use;
-// the Receipt's top-level Metrics field reuses the same shape for
-// end-to-end timing.
 message Metrics {
-  uint32 latency_ms = 1;        // wall clock for this evaluator's fire
-  uint32 input_tokens = 2;      // LLM evaluator only (zero for deterministic)
+  uint32 latency_ms = 1;
+  uint32 input_tokens = 2;      // LLM evaluator only
   uint32 output_tokens = 3;     // LLM evaluator only
   uint32 cache_hit_tokens = 4;  // LLM evaluator only (prompt-cache hits)
-  string evaluator_id = 5;      // "rules", "llm:sonnet-4.6", "adapter:sql-parser", etc.
 }

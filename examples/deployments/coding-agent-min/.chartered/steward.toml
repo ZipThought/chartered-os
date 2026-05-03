@@ -1,0 +1,23 @@
+# Steward-level configuration. Per-role backend selection only.
+# The Actor's system prompt is composed by the Runtime from the
+# Charter's behavioral_spec, Charter Scopes, and Role context (per
+# spec §Cognition Layer), so the deployment never hand-writes it.
+# Tools live in tools/*.toml — every .toml in that directory
+# registers a Tool.
+
+[actor]
+backend = "openai"
+model = "gpt-4o-mini"
+
+[evaluator]
+backend = "openai"
+model = "gpt-4o-mini"
+
+# Optional: Tester and Judge for offline scenarios.
+# [tester]
+# backend = "openai"
+# model = "gpt-4o-mini"
+#
+# [judge]
+# backend = "openai"
+# model = "gpt-4o-mini"

@@ -1,0 +1,3 @@
+id = "read_file"
+executor = "native_fs_read"
+description = "Read a file inside the operator's authorized scope."

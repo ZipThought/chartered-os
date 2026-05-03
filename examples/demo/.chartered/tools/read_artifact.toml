@@ -1,0 +1,2 @@
+id = "read_artifact"
+executor = "native_artifact_read"

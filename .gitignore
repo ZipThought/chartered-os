@@ -1,3 +1,9 @@
+# Top secret!
+.env
+
+# Per-developer Claude Code settings (must not be committed)
+.claude/settings.local.json
+
 # Build artifacts
 target/
 *.swp
@@ -13,9 +19,9 @@ target/
 .DS_Store
 Thumbs.db
 
-# Chartered runtime data (user-specific, not committed)
-.chartered/receipts/
-.chartered/chartered.toml
+# Per-run trail and cognition logs written by chartered-runtime under
+# any deployment's .chartered/runs/<run_id>/ directory.
+**/.chartered/runs/
 
 # Tooling/session state (Claude Code skills/hooks)
 .remember/

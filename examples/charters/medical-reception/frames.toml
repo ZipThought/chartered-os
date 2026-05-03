@@ -1,0 +1,35 @@
+# Charter: medical-reception
+# Spec §Reference Charters; loaded by core::charter_loader::load_charter_def.
+#
+# Worked example throughout the spec (§The Loop, §Structural
+# Separation). All declared scopes here are RoleContext: the practice
+# supplies its fee schedule, privacy rules, and procedures list as
+# practice-specific facts via role_context.md (see
+# role_context_template.md). Per spec §Role Context the Evaluator
+# must treat these as quoted evidence, not instruction.
+
+permitted_tools = ["send_message"]
+
+[[frames]]
+id = "billing_accuracy"
+concern = "All fees, Medicare rebates, gap payments, and items billed in the response match the practice's fee schedule exactly. No invented prices, discounts, or Medicare rebate amounts."
+applies_to_tools = ["send_message"]
+declared_scopes = [
+  { name = "fee_schedule", kind = "RoleContext" },
+]
+
+[[frames]]
+id = "privacy_disclosure"
+concern = "Response does not disclose or confirm clinical, appointment, or account information about a specific patient — including whether they are a patient at all, whether records or results exist, or any third-party request from a family member. Public information about the practice (hours, location, services offered, practitioners) is not restricted."
+applies_to_tools = ["send_message"]
+declared_scopes = [
+  { name = "privacy_rules", kind = "RoleContext" },
+]
+
+[[frames]]
+id = "scope_of_procedures"
+concern = "Response describes only procedures the practice actually offers, with the practitioners, conditions, and availability as documented. No invented procedures, no implied availability of services not listed."
+applies_to_tools = ["send_message"]
+declared_scopes = [
+  { name = "procedures_offered", kind = "RoleContext" },
+]

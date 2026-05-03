@@ -1,160 +1,128 @@
 # Implementation Review Checklist
 
-Governs all implementation work on CharteredOS. Each section states an invariant, a diagnostic, and what violation looks like.
+Governs all implementation work. Each section states an invariant, a diagnostic, and what violation looks like.
 
 ---
 
 ## Risk Register
 
-Risks categorized by whether they undermine a structural property (unacceptable — no probability argument mitigates) or represent a bounded trade-off (acceptable — cost is known, named, and bounded).
+Risks categorized by whether they undermine a structural property (unacceptable — no probability argument mitigates) or represent a bounded trade-off (acceptable — cost is known and bounded).
 
 ### Unacceptable: Trust Boundary Leak
 
-The Steward reaches consequence by any path that does not pass through the Gate.
+The Steward reaches consequence by any path that does not pass through the Gate. Examples: raw filesystem access alongside `read_file`/`write_file`; arbitrary shell commands instead of `exec_command`; raw sockets instead of a Charter-governed Tool.
 
-This risk killed: Stewards with raw filesystem access alongside the Runtime's `read_file` Tool; Stewards with raw socket access alongside `http_request`; Stewards that exec arbitrary shell commands instead of going through `exec_command`.
-
-Diagnostic: "Is there any sequence of actions the Steward can take that produces an effect without going through the Tool dispatcher and the Gate?" Yes → the trust property does not hold. The Steward's Tool vocabulary is the *only* path to consequence; if any other path exists, governance is bypassed by exercising it.
+Diagnostic: "Is there any sequence of actions the Steward can take that produces an effect without going through the Tool dispatcher and the Gate?" Yes → the loop's coverage is broken; effects escape the Receipt trail.
 
 Severity: structural. Trust-by-construction means *every* path is governed.
 
 ### Unacceptable: Persuasive Context Leak Into Evaluator
 
-The evaluator sees the Steward's conversation history, the customer's messages, the Steward's reasoning, or any other persuasive surface.
+Violation of the *persuasive-context-exclusion invariant* (`SPECIFICATION.md > Structural Separation`).
 
-This risk killed: evaluator prompts that included "Conversation so far: ..." for context; evaluators that received the Steward's reasoning field for transparency; evaluators that accepted the customer's tone as input.
+Diagnostic: "For every evaluator call, what fields does the prompt contain? Are any of them the Steward's conversational, reasoning, or persuasive state?" Yes → invariant broken. The Runtime asserts the absence of these fields before any evaluator call; assertion failure halts evaluation.
 
-Diagnostic: "For every evaluator call, what fields does the prompt contain? Are any of them the Steward's conversational, reasoning, or persuasive state?" Yes → structural separation is broken. The evaluator inherits the masking that produced the violation. The Runtime asserts the absence of these fields before issuing any evaluator call; assertion failure halts evaluation.
-
-Severity: structural. The architectural guarantee depends on this exclusion.
+Severity: structural.
 
 ### Unacceptable: Silent Failure
 
-A failure mode where governance degrades without the operator knowing.
+A failure mode where governance degrades without the operator knowing. Examples: Receipt-write-failure-continues under enforcement; Gate timeout that defaults to ALLOW; Evaluator unavailability that silently passes the Frame.
 
-This risk killed: Receipt-write-failure-continues-execution on the buffered path under enforcement; Gate timeout that defaults to ALLOW; LLM evaluator unavailability that silently passes the Frame.
+Diagnostic: "Is there a failure mode where the Runtime continues operating but with reduced governance coverage, and nothing in the Receipts indicates the reduction?" Yes → operator cannot distinguish governed from partially-governed. Resolution: every partial-coverage condition flips `intercept_complete=false`.
 
-Diagnostic: "Is there a failure mode where the Runtime continues operating but with reduced governance coverage, and nothing in the Receipts indicates the reduction?" Yes → the operator cannot distinguish governed from partially-governed. Resolution: every partial-coverage condition flips `intercept_complete=false` on the affected Receipts.
-
-Severity: structural. A bound named, with operator visibility, is acceptable. An invisible degradation is not.
+Severity: structural. A bound named with operator visibility is acceptable; invisible degradation is not.
 
 ### Unacceptable: Default-Allow on Chain Exhaustion
 
-A Frame's evaluator chain runs through every evaluator with DEFER and the Frame's Ruling becomes GROUNDED.
+A Frame's Evaluator chain runs through every step with DEFER and the Frame's Ruling becomes GROUNDED.
 
-Diagnostic: "Under `full` enforcement, when every evaluator in a Frame's chain returns DEFER (the Frame applies but no evaluator confidently rules), what is the Frame's Ruling?" GROUNDED → default-allow on chain exhaustion, violates the default-deny invariant. Correct: UNGROUNDED.
+Diagnostic: "Under `full` enforcement, when every step in a Frame's chain returns DEFER, what is the Frame's Ruling?" GROUNDED → default-allow violates default-deny. Correct: UNGROUNDED.
 
-Severity: structural. Default-deny is the architectural posture; default-allow inverts it.
+Severity: structural.
 
 ### Unacceptable: Across-Frame Short-Circuit
 
 The conjunction over Frames stops after the first DENY, hiding subsequent violations.
 
-Diagnostic: "Given a proposal that violates Frames A and C but not B, does the Receipt show Verdicts for A, B, and C?" No → the conjunction short-circuited. Refinement receives feedback only for A; the Steward fixes A, re-proposes, hits C, refines, accidentally re-introduces A. Iteration count balloons on incomplete feedback.
+Diagnostic: "Given a proposal that violates Frames A and C but not B, does the Receipt show Verdicts for A, B, and C?" No → conjunction short-circuited. Refinement receives feedback only for A; the Steward fixes A, re-proposes, hits C, refines, accidentally re-introduces A.
 
-Severity: structural. Convergence of the refinement loop depends on the conjunction reporting every violation in one cycle.
+Severity: structural. Convergence depends on the conjunction reporting every violation in one cycle.
 
-### Unacceptable: LLM in the Subprocess-Containment Kernel Hook
+### Unacceptable: Finite-Specification Verdict on LLM-Authored Content
 
-Synchronous LLM evaluation in any code path constrained to a microsecond latency budget — specifically the subprocess-containment kernel hook for intercepted syscalls.
+A Frame's Evaluator returns a Verdict from a finite specification (regex, grammar, parsed-AST walk, enumerated allowlist, canonicalizer) applied to a tool-call field whose value originates from the LLM.
 
-This risk killed: per-syscall LLM evaluation in the subprocess-containment layer; LLM judgments routed to the kernel-hook decision instead of being surfaced as a Tool call; small/fast LLM substitutions to fit the hook's budget.
+Examples that killed this: regex deny-patterns on `send_message.content`; SQL-AST walks for "no DELETE without WHERE" as the verdict on a `sql` parameter; allowlist matches on `cmd` strings (`rm -rf` ≡ `find -delete` ≡ `python -c "shutil.rmtree(...)"`); canonicalized-path allowlists on `read_file.path` or `write_file.path`; URL prefix or domain matchers on a destination URL; competitor-substring or "DISCOUNT" / "production" substring matchers on customer-facing content.
 
-Diagnostic: "Does the subprocess-containment kernel hook (or any other microsecond-budget code path) make a synchronous LLM call to decide allow/deny?" Yes → the hook stalls at LLM latency, operators disable governance to recover throughput, the architecture's purpose is defeated. Resolution: kernel-hook decisions are deterministic only; LLM-based judgment lives in the Gate at the tool-call boundary (where the Steward's propose-step pace accommodates it) or asynchronously over the Receipt corpus.
+Diagnostic: "For each Frame, list the fields the Verdict depends on. For every field whose value the Actor emitted, is the Verdict produced by an LLM-class Evaluator?" No → finite variety against unbounded variety; the Evaluator's ALLOW is a positive Verdict the Actor never refines against, the loop converges on plausible violations, the Receipt trail records ALLOWED for content that should have been refined.
 
-Severity: structural. Substituting a tiny fast model gives wrong answers fast (false assurance, worse than no governance).
+Severity: structural. Ashby's law — regulator variety must match regulated variety. The "constrained tool params" reframing is itself the anti-pattern in disguise: parseability is finite, LLM output variety is not. "Layered defense" via finite-then-LLM on the same field is the same anti-pattern: the finite ALLOW short-circuits the LLM-class Evaluator. See `SPECIFICATION.md > Requisite Variety`.
 
-This risk does *not* prohibit LLM evaluators in the Gate at the tool-call boundary. The Gate runs at the Steward's propose-step pace (hundreds of milliseconds, often seconds for LLM-driven Stewards), which is where LLM evaluators belong and where most semantic-judgment Frames live.
+### Unacceptable: Loop Property Retrofit of Unmodified Agents
 
-### Unacceptable: Trust Retrofit of Unmodified Agents
+Implementing or describing the framework as if it could deliver the loop's property for unmodified third-party agents.
 
-Implementing or describing the framework as if it could deliver trust as a property for unmodified third-party agents.
+Diagnostic: "Does the documentation or implementation claim that running an unmodified third-party agent under the Runtime delivers the loop?" Yes → contradicts the architecture. The Steward is built *for* the Runtime; the loop property is structural to that pairing, not retrofittable.
 
-Diagnostic: "Does the documentation or implementation claim that running an unmodified third-party agent under the Runtime delivers trust as a property?" Yes → the claim contradicts `SPECIFICATION.md > Anti-Position`. Trust is established at the Steward layer (Stewards built for this Runtime), not at the syscall layer.
-
-Severity: structural. The trust property cannot be retrofitted onto agents that were not built against this architecture.
+Severity: structural.
 
 ### Unacceptable: Premature Implementation
 
 Writing code before the design is settled. Building before understanding.
 
-Diagnostic: "Has the implementer stated in their own words: what is being built, why, what structural properties it must have, and what bypass classes exist?" No → the implementer will build something structurally wrong and then try to patch it. The patching creates cascading compensation (see AGENTS.md).
+Diagnostic: "Has the implementer stated in their own words: what is being built, why, what structural properties it must have, and what bypass classes exist?" No → the implementer will build something structurally wrong and then patch it, creating cascading compensation (see `AGENTS.md`).
 
-Severity: structural. Code that is structurally wrong cannot be fixed incrementally. It must be replaced.
+Severity: structural. Code that is structurally wrong cannot be fixed incrementally — it must be replaced.
 
 ### Acceptable: False Positives Under Default-Deny
 
 Full enforcement with insufficient Charter precision denies legitimate actions.
 
-Bounded by: the operator's Charter precision. Shadow mode (passthrough) resolves the bootstrapping problem.
+Bounded by Charter precision; shadow mode (`passthrough`) resolves bootstrapping. False positives are visible (denied), recoverable (refine the Charter), and the loop converges. False negatives are invisible, irrecoverable, and corrupt the loop's record.
 
-Why acceptable: false positives are visible (denied), recoverable (refine the Charter), directionally safe (action did not execute). False negatives are invisible (violation reached the world), irrecoverable (effect occurred), directionally unsafe.
-
-Diagnostic: "Does the operator have a path from 'deny everything' to 'deny only violations' without removing governance?" Yes (passthrough → rules → full) → acceptable.
+Diagnostic: "Does the operator have a path from 'deny everything' to 'deny only violations' without removing governance?" Yes (`passthrough → full`) → acceptable.
 
 ### Acceptable: Buffered Receipt Loss in Crash
 
-Non-critical allowed Receipts may be lost if the Runtime crashes between buffer append and flush.
-
-Bounded by: flush interval × throughput. Default 100ms. Operator can set `batch_fsync_ms = 0` or mark Frames critical for strict durability.
-
-Why acceptable: per-tool-call `fdatasync` adds latency that pushes operators toward disabling the Runtime. The trade-off — lose some Receipts in a rare crash, or lose all governance because operators turn it off — favors the bounded loss.
+Non-critical allowed Receipts may be lost if the Runtime crashes between buffer append and flush. Bounded by flush interval × throughput. Operator can set `batch_fsync_ms = 0` or mark Frames critical.
 
 Diagnostic: "Is the loss bound documented? Can the operator choose a different bound? Does Runtime crash fail in-flight tool calls?" All yes → acceptable.
 
-### Acceptable: API-Speed Governance Latency for LLM Frames
+### Acceptable: Per-Proposal Evaluator Latency
 
-The within-Frame chain may include an LLM evaluator. When it fires, the Frame's evaluation latency is at API speed (hundreds of milliseconds to seconds).
+Every Frame whose Ruling depends on LLM-authored content evaluates with an LLM-class Evaluator (see `SPECIFICATION.md > Requisite Variety`). Latency at API speed (hundreds of milliseconds to seconds), absorbed by the Actor's turn cycle. Prefix caching keeps the per-proposal cost ≈ proposal tail only (see `SPECIFICATION.md > Appendix A: Prefix Cache`).
 
-Bounded by: the Steward's natural propose-step pace, which is itself LLM-driven. The latency is absorbed by the Steward's existing turn cycle.
+The alternative — substituting a finite-specification verifier — is the *Finite-Specification Verdict on LLM-Authored Content* anti-pattern.
 
-Why acceptable: the alternative is no LLM-based judgment, which means deterministic-only evaluators, which cannot capture Frames that genuinely need semantic understanding (e.g., the medical-disclosure Frame).
-
-Diagnostic: "Does the architecture preclude a faster LLM evaluator?" No (the evaluator interface is pluggable) → acceptable.
-
-### Acceptable: Subprocess Containment Coverage Gaps
-
-Listed in `SPECIFICATION.md > Subprocess Containment > Honest Gap Inventory`. JIT, FD laundering, namespace confusion, ioctl-mediated effects.
-
-Bounded by: per-threat-model intercept set widening; per-deployment containment posture decisions.
-
-Why acceptable: containment is hygiene around external programs, not where trust is established. Trust attaches to the Steward above; the gaps in the layer below are bounded operational concerns, not structural failures.
-
-Diagnostic: "Does the operator have a knob to widen containment coverage if their threat model warrants?" Yes → acceptable.
+Diagnostic: "Does the architecture preclude a faster LLM-class Evaluator?" No (Evaluator interface is pluggable; smaller/cheaper LLMs may fit some Frames) → acceptable.
 
 ---
 
 ## Design Process
 
-Before writing code — diagnostics that prevent the structural failures.
-
 ### Tool-Call Boundary, Not Syscall Boundary
 
-Diagnostic: "For each governance decision the implementation makes, what is the boundary at which the decision attaches?" Tool call → correct. Syscall → wrong layer for trust (see Anti-Position). Application API hook → cooperation-dependent.
+Diagnostic: "For each governance decision, what is the boundary at which the decision attaches?" Tool call → semantic layer. Syscall → system layer (containment only, never as Frame Ruling). Application API hook → cooperation-dependent, wrong.
 
-### Structural Separation, Stated Adjacent to Construction
+### Structural Separation Stated Adjacent to Construction
 
-Diagnostic: "Where in the code is the evaluator's prompt constructed?" Locate it. "Adjacent to that construction, is the assertion that excludes conversation history, customer messages, and Steward reasoning?" Adjacent → correct. Distant → the assertion will rot when the construction changes.
+Diagnostic: "Where in the code is the evaluator's prompt constructed? Adjacent to that construction, is the assertion that excludes conversation history, customer messages, and Steward reasoning?" Adjacent → correct. Distant → the assertion will rot when the construction changes.
 
 ### One Path From Steward to Consequence
 
 Diagnostic: "Trace every code path from the Steward's intent to a system effect (file write, network call, subprocess dispatch). Does each path go through the Tool dispatcher and the Gate?" Any path that does not → trust boundary leak.
 
-### The Steward Has No Raw Access
+### Tool Registry Is the Only Path
 
-Diagnostic: "What primitives does the Steward's runtime environment expose to the Steward's code?" Only the Tool registry → correct. Raw stdlib filesystem / network / subprocess primitives → leak.
-
-### Cooperative vs Constitutional
-
-Diagnostic: "Does this mechanism work if the Steward does not cooperate?" Constitutional governance attaches because the Steward has no other path. Cooperative governance attaches because the Steward calls the hook. Tool-call boundary is constitutional *because the Steward has no other path*. Failing to enforce the no-raw-access invariant degrades constitutional governance to cooperative.
+Diagnostic: "Does the Runtime make the Tool registry the only available path from Actor to effect? What primitives does the Actor's runtime environment expose?" Tool registry only → governance is structural to the channel. Raw stdlib filesystem / network / subprocess primitives reachable from the Actor → effects escape the Gate, the Receipt trail loses the call, the loop's coverage is broken. The property belongs to the Runtime's construction, not to the LLM's behavior; the LLM has no agency over the channel — it can only emit through what the Runtime exposes.
 
 ### Closed-Loop Required
 
-Diagnostic: "Does the Gate run on every live tool call, or only on a pre-launch test bank?" Live → closed-loop, structurally sound under unmodeled variance. Pre-launch only → open-loop, drifts under variance.
+Diagnostic: "Does the Gate run on every live tool call, or only on a pre-launch test bank?" Live → closed-loop. Pre-launch only → open-loop, drifts under variance.
 
 ### Over-Engineering Detection
 
-Diagnostic: "How many concepts does this design introduce? Could the same structural properties be achieved with fewer?" Count the nouns. The spec has: Steward, Charter, Frame, Scope, Role context, Workspace, Professional, Foundation Stewards, Gate, Tool, Action, Finding, Ruling, Outcome, Receipt, Snapshot, Task, Trigger, Adapter, Surface. If the implementation introduces nouns not in the spec → over-engineering.
+Diagnostic: "How many concepts does this design introduce? Could the same structural properties be achieved with fewer?" If the implementation introduces nouns not in the spec's Vocabulary section → over-engineering.
 
 ---
 
@@ -166,55 +134,59 @@ Diagnostic: "Inject 500ms latency into Receipt write. Does the tool call complet
 
 ### Aggregate Across Frames, Then Decide
 
-Diagnostic: "When the proposal violates two Frames, are both Verdicts present in the Receipt?" Yes → aggregation correct. No → across-Frame short-circuit (see Risk Register).
+Diagnostic: "When the proposal violates two Frames, are both Verdicts present in the Receipt?" Yes → correct. No → across-Frame short-circuit (Risk Register).
 
 ### Refinement Feedback at Frame Granularity
 
-Diagnostic: "What does the Steward receive on denial?" Frame identifier + reason → correct. Full evaluator trace → too much surface for adversarial input. Empty / generic "denied" → no signal for refinement.
+Diagnostic: "What does the Steward receive on denial?" Frame identifier + reason → correct. Full evaluator trace → too much surface for adversarial input. Empty/generic → no signal for refinement.
 
 ### Iteration Budget Bounded
 
-Diagnostic: "What is the maximum number of refinement cycles before the loop halts?" Configurable, bounded → correct. Unbounded → infinite loop risk on intractable proposals.
+Diagnostic: "Maximum number of refinement cycles?" Configurable, bounded → correct. Unbounded → infinite loop risk.
 
 ### Escalation Path Visible
 
-Diagnostic: "When the budget exhausts, what does the operator see?" Receipt with `outcome: ESCALATED` and a record of every proposed action / Verdict in the cycle → correct. Silent halt → containment without observability.
+Diagnostic: "When the budget exhausts, what does the operator see?" Receipt with `outcome: ESCALATED` and a record of every proposed action / Verdict → correct. Silent halt → containment without observability.
 
 ### Vacuous Satisfaction vs Defer
 
-Diagnostic: "When a Frame's first evaluator determines the Frame does not apply, does it return ALLOW (Frame GROUNDED vacuously) or DEFER?" DEFER → conflates not-applicable with cannot-decide; default-deny denies the action. Correct: ALLOW.
+Diagnostic: "When a Frame's first evaluator determines the Frame does not apply, does it return ALLOW or DEFER?" DEFER → conflates not-applicable with cannot-decide. Correct: ALLOW.
 
 ### OUT_OF_SCOPE Visibility
 
-Diagnostic: "When a Frame's applicability conditions are unmet for this proposal, does the Frame produce OUT_OF_SCOPE in the Receipt?" Yes → governance gaps surface in audit. No (collapsed to GROUNDED) → governance gaps hidden.
+Diagnostic: "When applicability conditions are unmet, does the Frame produce OUT_OF_SCOPE in the Receipt?" Yes → coverage gaps surface. No (collapsed to GROUNDED) → coverage gaps hidden.
+
+### Capability Check Pre-Gate
+
+Diagnostic: "Tool not in the Steward's permitted set — what does the Receipt record?" `outcome: DENIED`, the rejected Tool name, no Verdicts. Frame eval not invoked. Inject a Tool not in the permitted set; the Receipt must show denial without any Verdict.
 
 ---
 
 ## Frame and Evaluator Chain
 
-### Within-Frame Chain Short-Circuit on Confident Verdict
+### Within-Frame Chain Composition
 
-Diagnostic: "Given a chain [deterministic, LLM] where deterministic returns ALLOW: does the LLM evaluator fire?" Should not. Tracing should show the chain halted at deterministic.
+Diagnostic: "For each Frame whose Ruling depends on LLM-authored content, is the Evaluator LLM-class?" Per `SPECIFICATION.md > Requisite Variety`: yes → consistent. A finite-specification verifier in any position is the *Finite-Specification Verdict on LLM-Authored Content* anti-pattern.
 
 ### Within-Frame Trace Captured Per Receipt
 
-Diagnostic: "Given a denied Receipt, can the operator see which evaluator in the chain produced the DENY, what observations earlier evaluators attached, and which evaluators short-circuited?" No → the chain is opaque from Receipts; debugging is impossible.
+Diagnostic: "Given a denied Receipt, can the operator see which evaluator step produced the DENY?" No → debugging is impossible.
 
-### LLM Evaluator Prompt Excludes Persuasive Context
+### Evaluator Prompt Excludes Persuasive Context
 
-Diagnostic: "Inspect the LLM evaluator's prompt construction. Does it ever receive `conversation_history`, `customer_messages`, `agent_reasoning`, or any field carrying the persuasive surface?" Yes → structural separation violated. The Runtime asserts before issuing the call.
+Per the persuasive-context-exclusion invariant (`SPECIFICATION.md > Structural Separation`).
 
-### LLM Evaluator Output Parse-Fail-Deny
+Diagnostic: "Inspect the Evaluator's prompt construction. Does it ever receive `conversation_history`, `customer_messages`, `agent_reasoning`, or any persuasive field?" Yes → invariant violated. The Runtime asserts before issuing the call.
 
-Diagnostic: "Force the LLM to return malformed JSON. What is the Frame's Ruling?" UNGROUNDED → correct. GROUNDED or skipped → silent default-allow.
+### Evaluator Output Parse-Fail-Deny
 
-### Adapter-Fronted Evaluator Failure Modes
+Diagnostic: "Force the Evaluator to return malformed JSON. Frame's Ruling?" UNGROUNDED → correct. GROUNDED or skipped → silent default-allow.
 
-Diagnostic: "When an adapter-fronted evaluator's peer process is unreachable, what happens?" UNGROUNDED with `intercept_complete=false` → correct. Skipped, defaulted to ALLOW, retried indefinitely → wrong.
+### Prior-Receipt Query Composition
 
-### Constraint Decomposition Matches Variety
+Per `SPECIFICATION.md > Known Limitations` (sequence-dependent Frames query semantics) and `SPECIFICATION.md > Structural Separation` (authoritative state composition).
 
-Diagnostic: "For each Frame, does the within-Frame evaluator chain decompose the constraint space into formal sub-constraints (deterministic verifiers) and semantic sub-constraints (LLM verifiers)?" Decomposed → matches Ashby's law (cheapest sufficient verifier per sub-constraint). Pure-LLM chain on a Frame whose constraint has formal components → wasteful and adversarially attackable. Pure-deterministic chain on a Frame whose constraint is irreducibly semantic → underpowered.
+Diagnostic: "For Frames whose Ruling depends on prior Receipts, where does the query live?" Frame declares the filter; Runtime executes before the Evaluator call; result enters the Evaluator's authoritative state. Evaluator calling the primitive directly → persuasive-context-exclusion at risk; query buried in Evaluator code → Charter cannot govern it.
 
 ---
 
@@ -222,75 +194,39 @@ Diagnostic: "For each Frame, does the within-Frame evaluator chain decompose the
 
 ### Typed Schema, Not Free-Form
 
-Diagnostic: "What is `tool_params`'s shape for a new Tool?" Typed (struct, schema, message definition) → correct. Free-form bytes/strings → re-introduces the syscall-layer ambiguity that the architecture exists to avoid.
+Diagnostic: "What is `tool_params`'s shape for a new Tool?" Typed → correct. Free-form bytes/strings → re-introduces syscall-layer ambiguity at the Frame.
 
 ### Frame Applicability Declared at Tool Authoring
 
-Diagnostic: "Given a Tool, can the operator immediately see which Frames can match it?" Tool definition declares `applies_to_frames` → correct. Operator must read every Frame to discover applicability → over-engineered or under-typed.
+Diagnostic: "Given a Tool, can the operator immediately see which Frames can match it?" Tool definition declares `applies_to_frames` → correct.
 
 ### Tool Executor Boundary
 
-Diagnostic: "Where does the Tool's executor run — in-runtime, in an Adapter peer process, or as a contained subprocess?" Declared at Tool authoring → correct. Implicit / inferred from Tool name → fragile, fails when the implementation changes.
+Diagnostic: "Where does the Tool's executor run — in-Runtime, in a peer process, or as a contained subprocess?" Declared at Tool authoring → correct. Inferred from name → fragile.
 
 ### Result Schema Validated
 
-Diagnostic: "What does the Tool return to the Steward? Is the result schema-validated?" Schema-validated → correct. Free-form pass-through → the Steward's persuasive context grows from Tool results too.
+Diagnostic: "Is the Tool's result schema-validated?" Schema-validated → correct. Free-form pass-through → the Steward's persuasive context grows from Tool results.
 
 ---
 
-## Charter and Charter Models
+## Charter
 
 ### Charter Scope vs Role Context Distinction
 
-Diagnostic: "For each Scope a Frame references, can the implementer state whether it carries authority (Charter Scope, authored by the Charter engineer) or facts (Role context Scope, supplied by the Professional)?" Yes → distinction load-bearing for adversarial input handling. No (Scopes treated uniformly) → uploaded materials could inject instructions into evaluation.
+Diagnostic: "For each Scope a Frame references, can the implementer state whether it carries authority (Charter Scope) or facts (Role context Scope)?" Yes → distinction load-bearing. No → uploaded materials could inject instructions.
 
-### Charter Model vs Charter Instance
+### Snapshot Protects In-Flight Tasks
 
-Diagnostic: "When a Charter model is updated, does in-flight Tasks complete under their existing Snapshot?" Yes → Snapshot-protected. No → mid-Task policy switch, ambiguity in the audit trail.
+Diagnostic: "When a Charter is updated, do in-flight Tasks complete under their existing Snapshot?" Yes → Snapshot-protected. No → mid-Task policy switch.
 
 ### Charter Version on Receipts
 
-Diagnostic: "Does every Receipt reference both the Charter version and the Role context version active at evaluation time?" Yes → reproducibility. No → Receipts cannot be replayed against the policy that produced them.
+Diagnostic: "Does every Receipt reference both Charter version and Role context version active at evaluation time?" Yes → reproducibility.
 
 ### Frame Reference Validation
 
-Diagnostic: "Does a Frame reference to a Scope that does not exist fail at Charter load time?" Yes → fails fast. No (silent at evaluation time) → Frame returns no result; Receipt is incomplete; default-deny applies, but the operator cannot tell why.
-
----
-
-## Workspace
-
-### Tenant Isolation, Defense in Depth
-
-Diagnostic: "Does cross-Workspace access require all three layers (store, engine, API) to fail simultaneously?" Yes → defense in depth. No (any single layer can leak) → tenant boundary is a single point of failure.
-
-### Workspace ID From Authenticated Session
-
-Diagnostic: "Where does the API derive `workspace_id`?" From authenticated session → correct. From request body → client can spoof, cross-tenant access possible.
-
-### Five Panels Reflect Same Domain Model
-
-Diagnostic: "Selecting an action in the Work area — does the corresponding Receipt surface in the Receipt trail panel? Does the corresponding Finding surface in Findings?" Yes → coherent. No → panels are decoupled views, audit gaps possible.
-
-### Workspace UI Hosted by Daemon
-
-Diagnostic: "If the Daemon is unreachable, can the Professional still author Charter content via the Workspace UI?" No → Workspace authoring is offline; correct. Yes (UI runs in-Runtime) → couples Workspace surface to per-deployment Runtime, breaks runtime/daemon split.
-
----
-
-## Foundation Stewards
-
-### Foundation Stewards Are Themselves Governed
-
-Diagnostic: "When the Charter Editor modifies a Charter, is the modification a tool call gated by the Charter Editor's own Charter, with a Receipt?" Yes → self-hosting holds. No → meta-domain operates ungoverned, contradicts the framework's own discipline.
-
-### Coordinator Dispatches Through the Gate
-
-Diagnostic: "When the Coordinator recruits a sub-Steward to handle part of a Task, is the sub-Steward's tool call gated independently?" Yes → composition correct. No (Coordinator bypasses the Gate for sub-Stewards) → trust boundary leak via composition.
-
-### Foundation Stewards Domain-Agnostic
-
-Diagnostic: "Do Foundation Stewards reference Customer Service, Medical Reception, or Coding domain knowledge in their Charters?" No → domain-agnostic, correct. Yes → Foundation Stewards have leaked into application domains; refactor.
+Diagnostic: "Does a Frame reference to a non-existent Scope fail at Charter load time?" Yes → fails fast. No → silent at evaluation; default-deny applies but the operator cannot tell why.
 
 ---
 
@@ -298,143 +234,43 @@ Diagnostic: "Do Foundation Stewards reference Customer Service, Medical Receptio
 
 ### Receipt Granularity at Tool-Call Level
 
-Diagnostic: "What does a Receipt record?" Tool call + Verdicts + Outcome + metadata → correct. Syscalls fired downstream → wrong granularity for policy reasoning (those go in subprocess containment ChildReceipts).
+Diagnostic: "What does a Receipt record?" Tool call + Verdicts + Outcome + metadata → correct. Anything below the tool-call boundary (downstream syscalls, network packets) → wrong granularity; not the Receipt's concern.
+
+### One Receipt Per Gate Step
+
+Diagnostic: "How many Receipts does one Gate step produce?" One → spec-aligned. Two (decision separated from execution) → cardinality drift; the reconciliation invariant cannot bind across two records.
 
 ### Critical Path Durability
 
-Diagnostic: "Kill the Runtime with SIGKILL immediately after a denial on a critical Frame. Is the denial Receipt on disk?" No → ledger invariant violated for the most important class of Receipt.
+Diagnostic: "Kill the Runtime with SIGKILL immediately after a denial on a critical Frame. Is the denial Receipt on disk?" No → ledger invariant violated.
 
 ### Buffered Path Crash Window
 
-Diagnostic: "What is the maximum number of Receipts that can be lost in a Runtime crash?" Answer must be: flush interval × throughput. Unbounded → ring buffer has no backpressure.
+Diagnostic: "Maximum number of Receipts that can be lost in a Runtime crash?" Answer must be: flush interval × throughput. Unbounded → ring buffer has no backpressure.
 
 ### Reconciliation
 
-Diagnostic: "Receipt says `outcome: ALLOWED` for `exec_command('rm', ['file.txt'])`. Does `file.txt` not exist afterward?" Conversely for DENIED. Disagreement → the Receipt is lying, or the trust boundary has a gap.
+Diagnostic: "Receipt says `outcome: ALLOWED` for `exec_command('rm', ['file.txt'])`. Does `file.txt` not exist afterward? Conversely for DENIED?" Disagreement → the Receipt is lying, or the trust boundary has a gap.
 
 ### Sensitive-Field Redaction
 
-Diagnostic: "When a Frame declares `tool_params.body` sensitive, does the body appear in plaintext in storage? In query response?" Plaintext anywhere → audit trail is itself a leak vector.
-
-### Tool-Call Receipt Joins Subprocess-Containment Receipts
-
-Diagnostic: "Given a tool-call Receipt for `exec_command('psql', ...)`, can the operator query for every syscall-level Receipt produced by the spawned psql subprocess?" Yes (joined by `parent_receipt_id`) → correct. Disjoint stores → operator cannot reconstruct what the subprocess did.
-
----
-
-## Subprocess Containment
-
-### Inheritance Across Generations
-
-Diagnostic: "Subprocess spawns child, child spawns grandchild, grandchild calls `execve`. Is the grandchild's `execve` intercepted?" No → containment has a generational escape.
-
-### Statically Linked Binaries
-
-Diagnostic: "Subprocess builds a static binary at runtime and executes it. Is the `execve` intercepted?" Should not fail (seccomp is below libc). Verification is not optional.
-
-### Sequence Integrity
-
-Diagnostic: "After containment of N intercepted syscalls, are there exactly N ChildReceipts joined to the tool-call Receipt with sequence numbers 1..N?" Gaps → missed interception. Duplicates → double-counting.
-
-### Argument Decode From Hostile Memory
-
-Diagnostic: "What happens when argv points to unmapped memory? Crosses a page boundary? Contains embedded nulls?" Crash → the subprocess can crash the Runtime by crafting argv. Malformed input → ChildReceipt with raw bytes, not a segfault.
-
-### Default Intercept Set Documented
-
-Diagnostic: "Can the operator inspect the intercept set their containment helper is configured for?" Yes (configuration file, runtime status) → correct. Hardcoded / opaque → operator's threat model cannot adjust coverage.
-
-### Honest Gap Inventory in Receipts
-
-Diagnostic: "When the Steward's Tool dispatches a process that exercises a known containment gap (JIT, FD laundering, namespace confusion, ioctl), does the Receipt indicate reduced coverage?" `intercept_complete=false` on affected Receipts → correct (operator-visible). Silent gap → false assurance.
-
----
-
-## Daemon Protocol
-
-### Socket Lifecycle
-
-Diagnostic: "Daemon not running at startup — does the Runtime operate standalone or crash?" Standalone with local-file Receipt fallback → correct. Crash → Daemon is a hard dependency, contradicting the standalone-operation invariant.
-
-### Forward Compatibility
-
-Diagnostic: "v2 Daemon sends unknown `Outcome` enum value — does the Runtime crash?" Crash → forward compatibility broken. Pass through with `intercept_complete=false` → correct.
-
-### Backpressure on Receipt Ingestion
-
-Diagnostic: "Runtime sends Receipts faster than Daemon ingests, socket buffer full — block or drop?" Block → tool calls stall. Drop → Receipts lost silently. Strategy must be explicit and named (typically: block on critical Receipts, buffer-then-block on non-critical).
-
-### Daemon Restart Mid-Session
-
-Diagnostic: "Daemon restarts mid-session — does the Runtime detect, reconnect, and continue or crash?" Reconnect with no lost Receipts → correct.
-
----
-
-## Adapter Contract
-
-### Adapters Are Peer Processes via Protobuf
-
-Diagnostic: "Does the Runtime contain code that loads Adapter manifests, dynamically links Adapter code, executes Adapter handlers in the Runtime's address space?" Yes → Adapter became a plugin; trust scope expanded to Adapter authors.
-
-### Adapter Authorship Without Engine Changes
-
-Diagnostic: "Can a third party write a new Adapter for a new external surface (e.g., a vendor SaaS API) without modifying any code in the Runtime, Daemon, or Gate?" No → architecture is closed; Adapter authorship requires core changes.
-
-### Adapter Unreachability Behavior
-
-Diagnostic: "When an Adapter's peer process is unreachable, what does the Steward see for the Tool that depends on it?" Tool returns error to the Steward, Receipt records the error → correct. Hang indefinitely / silent fallback → either operator's loop stalls or trust scope quietly extends.
-
-### Adapter Failure ≠ Gate Failure
-
-Diagnostic: "When an adapter-fronted evaluator's Adapter is unreachable, does the Frame default-deny (UNGROUNDED with `intercept_complete=false`) or default-allow?" Default-deny → correct. Default-allow → silent governance gap.
+Diagnostic: "When a Frame declares `tool_params.body` sensitive, does the body appear in plaintext in storage? In query response?" Plaintext anywhere → the Receipt trail is itself a leak vector.
 
 ---
 
 ## Refinement Feedback
 
-### Steward Receives Feedback on Denial
+### Feedback at Frame Granularity, Across-Frame Conjunction
 
-Diagnostic: "When a Frame returns UNGROUNDED, what does the Steward's loop receive?" Frame identifier + reason for *every* violating Frame (across-Frame conjunction surfaces all) → correct.
+Diagnostic: "When Frame returns UNGROUNDED, what does the Steward's loop receive?" Frame identifier + reason for *every* violating Frame → correct.
 
 ### Feedback Does Not Leak Evaluator Internals
 
-Diagnostic: "Does the feedback contain evaluator prompts, evaluator reasoning, Scope text, or other internals?" Yes → adversarial input now has more surface to manipulate. Correct: Frame identifier + one-sentence reason only.
+Diagnostic: "Does the feedback contain Evaluator prompts, Evaluator reasoning, Scope text, or other internals?" Yes → adversarial input has more surface to manipulate. Correct: Frame identifier + one-sentence reason only.
 
 ### Refinement Loop Converges
 
-Diagnostic: "On a corpus of legitimate-but-initially-denied scenarios, does the average refinement count tend to a small number (e.g., 1.5–2.5)?" High counts → either the Charter is too tight (false-reject problem), the Steward cannot refine well (capability problem), or the conjunction is short-circuiting (Risk Register violation).
-
----
-
-## Empirical Measurement
-
-### Pairing Unit Is Scenario, Not Conversation
-
-Diagnostic: "What is the unit at which governed and ungoverned conditions are paired?" Scenario (initial conditions: opening message, technique, pressure) → correct. Conversation (full trajectory) → pairing is broken because divergence after turn 1 is the treatment effect.
-
-### Auditor Blind to Condition
-
-Diagnostic: "When the Auditor evaluates a final delivered output, can it tell which condition produced the output?" No → blinding correct. Yes → bias from knowledge of hypothesis.
-
-### Gate Prompt Excludes Persuasive Context (Measurement-Side)
-
-Diagnostic: same as the Runtime invariant, but verified in the measurement pipeline. The measurement infrastructure shares the Runtime's prompt-construction; the assertion fires in measurement runs too.
-
-### FAR / FRR Reported Per Technique
-
-Diagnostic: "Are FAR and FRR reported aggregate-only or per-adversarial-technique?" Per-technique → operationally actionable. Aggregate-only → masks per-technique structure.
-
-### Per-Technique Statistical Power Honestly Stated
-
-Diagnostic: "At per-technique scenario counts (typically ~6), does the paper claim per-technique significance?" No → honest. Yes → overclaimed.
-
-### Negative Result Diagnosable
-
-Diagnostic: "If FAR(governed) ≈ FAR(ungoverned), can the loop metrics decompose the failure (Gate misses, Steward doesn't refine, Steward doesn't violate even ungoverned)?" Yes → actionable negative. No → uninformative result.
-
-### Capability and Regression Use the Same Frames
-
-Diagnostic: "Are the Frame definitions used for capability evaluation (during Charter authoring) the same as those used for regression evaluation (in production via the Gate)?" Yes → lifecycle continuity. No (separate eval suite) → drift between dev-time and prod-time governance.
+Diagnostic: "On a corpus of legitimate-but-initially-denied scenarios, does average refinement count tend to a small number (1.5–2.5)?" High → Charter too tight, Steward cannot refine, or conjunction is short-circuiting.
 
 ---
 
@@ -442,38 +278,62 @@ Diagnostic: "Are the Frame definitions used for capability evaluation (during Ch
 
 ### Functional Equivalence in Passthrough
 
-Diagnostic: "Steward under Runtime in passthrough mode produces identical output to Steward without Runtime?" No → Runtime is altering Steward behavior before enforcement is enabled.
+Diagnostic: "Steward under Runtime in passthrough produces identical output to Steward without Runtime?" No → Runtime altering Steward behavior before enforcement enabled.
 
 ### Concurrent Stewards
 
-Diagnostic: "Two Stewards running simultaneously on the same Daemon — do they interfere?" Per-Steward Receipt namespacing prevents collision; Daemon's per-Steward connections are multiplexed correctly. Test.
+Diagnostic: "Two Stewards running simultaneously on the same Runtime — do they interfere?" Per-Steward Receipt namespacing prevents collision; per-Steward connections multiplexed correctly.
 
 ### SIGKILL Recovery
 
-Diagnostic: "Runtime killed by SIGKILL — child cleanup, terminal restored, Receipt store consistent?" Any "no" → production operators will hit this.
+Diagnostic: "Runtime killed by SIGKILL — child cleanup, Receipt store consistent?" Any 'no' → production operators will hit this.
 
-### Standalone Mode
+---
 
-Diagnostic: "Daemon down. Runtime continues with local Receipt files. Daemon comes up. Receipts ingested?" All yes → correct. Receipts lost / Runtime stalled → standalone-operation invariant broken.
+## Verification Methodology
+
+The kernel's claims are properties to be verified, not assertions. Verification requires synthetic input variety (Tester) and outcome scoring (Judge) operating on the live system through the same Runtime, Frames, and Receipts as production. Without this, "the kernel works" is unfalsifiable.
+
+### Pairing Unit Is Scenario, Not Conversation
+
+Diagnostic: "Unit at which governed and ungoverned conditions are paired?" Scenario → correct. Conversation → divergence after turn 1 is the treatment effect, not a confound.
+
+### Judge Blind to Condition
+
+Diagnostic: "Can the Judge tell which condition produced the output?" No → blinding correct.
+
+### Gate Prompt Honors the Persuasive-Context-Exclusion Invariant in Measurement
+
+Diagnostic: same as the Runtime invariant (`SPECIFICATION.md > Structural Separation`), verified end-to-end in the measurement pipeline.
+
+### FAR / FRR Reported Per Technique
+
+Diagnostic: "Aggregate-only or per-technique?" Per-technique → operationally actionable. Aggregate-only → masks per-technique structure.
+
+### Per-Technique Statistical Power Honestly Stated
+
+Diagnostic: "At per-technique scenario counts (~6), does the report claim per-technique significance?" No → honest. Yes → overclaimed.
+
+### Negative Result Diagnosable
+
+Diagnostic: "If FAR(governed) ≈ FAR(ungoverned), can loop metrics decompose the failure (Gate misses, Steward doesn't refine, Steward doesn't violate even ungoverned)?" Yes → actionable. No → uninformative.
+
+### Capability and Regression Use the Same Frames
+
+Diagnostic: "Same Frame definitions for capability evaluation (authoring) and regression evaluation (production via the Gate)?" Yes → lifecycle continuity. No → drift between dev-time and prod-time governance.
 
 ---
 
 ## Vocabulary Discipline
 
-The vocabulary, one canonical form per concept: `Steward`, `Charter`, `Charter model`, `Charter instance`, `Frame`, `Frame definition`, `Frame ruling`, `Scope`, `Role context`, `Workspace`, `Professional`, `Charter engineer`, `Foundation Stewards`, `Gate` / `PEP`, `Tool`, `tool call`, `Action`, `Finding`, `Ruling`, `Outcome`, `Receipt`, `Snapshot`, `Task`, `Trigger`, `Adapter`, `Surface`, `Subprocess containment`, `propose`, `refine`, `intercept`, `deny`, `passthrough`.
-
-Diagnostic: "Search the codebase for `reject`, `block`, `refuse`, `wrapper`, `shim`, `hook` (in Runtime surface), `command` (in abstract context), `log entry` (for Receipts), `result` (for Verdicts), `guard` (for evaluator)." Any hit outside kernel-mechanism context (in subprocess containment, where `trap` is the seccomp term) → discipline violation.
-
-The pre-commit hook enforces vocabulary on staged changes; the directive evaluator catches semantic drift the regex cannot.
+Diagnostic: grep the codebase for `reject`, `block`, `refuse`, `wrapper`, `shim`, `hook` (in Runtime surface), `command` (in abstract context), `log entry` (for Receipts), `result` (for Verdicts), `guard` (for evaluator). Any hit outside kernel-mechanism context → violation. Approved terms: `SPECIFICATION.md > Vocabulary`.
 
 ---
 
 ## Spec-Code Traceability
 
-Diagnostic: "For each invariant in `docs/SPECIFICATION.md` — which test asserts it?" Missing test → invariant is a claim, not a property.
+Diagnostic: "For each invariant in `SPECIFICATION.md` — which test asserts it?" Missing test → claim, not property.
 
 Diagnostic: "For each proto message — which Rust struct corresponds?" Missing struct → protocol message the Runtime cannot send or receive.
-
-Diagnostic: "For each failure case in the spec — which test triggers it?" Missing test → failure case is a story, not an engineering constraint.
 
 Diagnostic: "For each diagnostic in this checklist — which test or review step verifies it?" Missing verification → the diagnostic is decoration.

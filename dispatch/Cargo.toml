@@ -1,0 +1,20 @@
+[package]
+name = "chartered-dispatch"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+description = "OS-touching ToolExecutor implementations for the CharteredOS Runtime. Quarantines std::fs / std::process / tokio::net so the kernel (chartered-core) stays in-memory."
+
+[lib]
+name = "chartered_dispatch"
+path = "src/lib.rs"
+
+[dependencies]
+chartered-core = { path = "../core" }
+async-trait = "0.1"
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "fs", "process", "io-util"] }
+serde_json = "1"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "fs", "process", "io-util", "test-util"] }
+tempfile = "3"

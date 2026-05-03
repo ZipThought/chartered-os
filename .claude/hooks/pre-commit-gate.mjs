@@ -1,16 +1,5 @@
 #!/usr/bin/env node
-// Pre-commit governance: mirrors CharteredOS runtime authority evaluation.
-// Action (commit) → charter evaluation (claude -p) → verdict (allow/deny).
-//
-// AGENTS.md and CLAUDE.md are fed directly to the evaluator. The
-// evaluator is instructed to read the documents they reference —
-// docs/SPECIFICATION.md, docs/DESIGN_NOTES.md, docs/IMPLEMENTATION_CHECKLIST.md —
-// itself for the governance model and implementation-review diagnostics.
-//
-// Uses git diff HEAD — PreToolUse fires before Bash executes, so a
-// one-liner like `git add . && git commit ...` produces an empty diff
-// at hook-fire time. The evaluator handles the empty case by reading
-// the diff itself.
+// Pre-commit governance hook. See CLAUDE.md.
 import { execSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -32,15 +21,13 @@ try {
   try { hookInput = JSON.parse(input); } catch { hookInput = {}; }
   const bashCmd = hookInput?.tool_input?.command ?? "";
   if (!bashCmd.includes("git commit") && !bashCmd.includes("git merge")) {
-    // Not a commit — allow without auditing.
+    // Not a commit — allow without gateing.
     console.log(allow());
     process.exit(0);
   }
 
   const root = execSync("git rev-parse --show-toplevel", { encoding: "utf8" }).trim();
 
-  // Run CI sanity checks (cargo check + clippy + test) before governance audit.
-  // Same script as .github/workflows/ci.yml — single source of truth.
   try {
     execSync(`${root}/scripts/ci-checks.sh`, { encoding: "utf8", stdio: "pipe", timeout: 300_000 });
   } catch (ciErr) {
@@ -74,15 +61,15 @@ try {
 
   const prompt = `You are the CharteredOS pre-commit governance evaluator.
 
-The bash command and the diff are below. Read CLAUDE.md and AGENTS.md (inlined) for the directive, then read the documents they reference — docs/SPECIFICATION.md, docs/DESIGN_NOTES.md, docs/IMPLEMENTATION_CHECKLIST.md — for the governance model and implementation-review diagnostics. RTFM before evaluating.
+The bash command and the diff are below. Read CLAUDE.md and AGENTS.md (inlined) for the directive, then read the documents they reference — docs/SPECIFICATION.md, docs/IMPLEMENTATION_CHECKLIST.md — for the governance model and implementation-review diagnostics. RTFM before evaluating.
 
-Two bash-command shapes that hide the staged diff from this audit and must be denied — the audit fires once per Bash invocation and inspects the diff at that moment, so staging within the same invocation hides what is being committed:
+Two bash-command shapes that hide the staged diff from this gate and must be denied — the gate fires once per Bash invocation and inspects the diff at that moment, so staging within the same invocation hides what is being committed:
 
 1. Combined staging and committing in one invocation. Recognize this semantically: the same bash command both stages files and creates the commit (chained with \`&&\`, \`;\`, or any equivalent), or otherwise causes staging and committing to happen in a single PreToolUse fire. The mention of "git add" inside a quoted commit message body is NOT this pattern.
-   Reason to return: "Combined staging and committing in one Bash invocation hides the about-to-be-committed diff from the pre-commit audit. Split into two Bash tool calls: stage first, then commit."
+   Reason to return: "Combined staging and committing in one Bash invocation hides the about-to-be-committed diff from the pre-commit gate. Split into two Bash tool calls: stage first, then commit."
 
 2. Auto-staging during commit (\`git commit -a\`, \`git commit --all\`, or any flag that causes commit to stage modified files). The flag must be present in the actual command, not in a quoted message.
-   Reason to return: "Auto-staging during commit hides the diff from the pre-commit audit. Stage with a separate Bash tool call (\`git add <paths>\`), then commit without auto-stage flags."
+   Reason to return: "Auto-staging during commit hides the diff from the pre-commit gate. Stage with a separate Bash tool call (\`git add <paths>\`), then commit without auto-stage flags."
 
 Otherwise: evaluate the bash command (the commit message it carries) and every + line in the diff against the directive and the diagnostics. Only flag clear, unambiguous breaches. Do not flag existing code or style preferences.
 
@@ -132,6 +119,6 @@ ${diffSection}`;
     console.log(allow());
   }
 } catch (err) {
-  console.log(deny(err.message || "Pre-commit governance audit failed"));
+  console.log(deny(err.message || "Pre-commit governance gate failed"));
   process.exit(0);
 }

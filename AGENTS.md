@@ -77,9 +77,8 @@ Before modifying code, the agent MUST read the actual artifacts in the affected 
 
 ### Scope Rules
 
-- **CLAUDE.md** = project-level context. Auto-loaded by Claude Code. Points to this directive, to `docs/SPECIFICATION.md`, to `docs/DESIGN_NOTES.md`, and to `docs/IMPLEMENTATION_CHECKLIST.md`.
+- **CLAUDE.md** = project-level context. Auto-loaded by Claude Code. Points to this directive, to `docs/SPECIFICATION.md`, and to `docs/IMPLEMENTATION_CHECKLIST.md`.
 - **docs/SPECIFICATION.md** = source of truth for architecture, mechanism, and rationale. Sovereign. Agent inference derives from it, not the reverse.
-- **docs/DESIGN_NOTES.md** = considerations behind the spec — alternatives that fail and why, trade-offs named.
 - **docs/IMPLEMENTATION_CHECKLIST.md** = invariants and diagnostics that govern implementation review. Read before claiming any phase complete; answer the diagnostics relevant to the changed scope. The checklist is the structural gate.
 - **CONTEXT.md** = domain knowledge for the subtree rooted at its directory. Applies when any file in that subtree is read or modified.
 - Child `CONTEXT.md` inherits parent. No child may contradict parent. Child specializes.
@@ -187,12 +186,6 @@ Shared mutable state is hostile.
 **Module-level state:** Module-scoped mutable state with multiple consumer read/write = singleton (see Constructor Injection).
 
 Forbidden: reactive store abstractions bypassed by direct shared-object mutation.
-
-### Runtime Purity
-
-The Runtime is single-purpose and per-deployment: each Steward runs in its own Runtime process whose only job is to host that Steward under stated Charter. Configuration enters at startup from `.chartered/` (walk-up search; see `docs/SPECIFICATION.md > The Runtime > Configuration`). The Runtime does not modify its configuration at runtime; reload requires restart. Rationale: a Runtime that reloads config mid-session opens a window where the Steward observes one Charter and an effect occurs under another.
-
-The Runtime hosts the Steward loop and the Gate — prompt assembly, model dispatch, Tool dispatch, evaluator chain execution, Receipt writing. The Steward's *cognitive* work (which response to propose) is the Steward's; the *governance* work (whether the proposal passes the Gate) is the Runtime's; the *Charter authoring* work is the Charter engineer's; the *Role context* work is the Professional's. Confusing these layers is a category error — each has its own configuration scope and its own surface for change.
 
 ### Falsifiable Comments
 

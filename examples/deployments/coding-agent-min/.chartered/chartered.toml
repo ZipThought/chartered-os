@@ -1,0 +1,9 @@
+# Runtime-level configuration. Spec §The Runtime > Governance mode.
+# `grounding` injects Charter Scopes + Role context into the Actor's
+# system prompt. `evaluation` runs Frames before dispatch. The four
+# named modes are: full (both true), grounding-only, evaluation-only,
+# neither.
+
+[governance]
+grounding = true
+evaluation = true

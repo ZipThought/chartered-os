@@ -1,0 +1,3 @@
+id = "exec_command"
+executor = "native_exec"
+description = "Dispatch a subprocess. Post-dispatch syscalls are out of the Gate's view."
