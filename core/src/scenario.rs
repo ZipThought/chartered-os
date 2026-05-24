@@ -207,7 +207,7 @@ impl Tester for LlmTester {
             .await
             .map_err(|e| TesterError(format!("backend error: {e}")))?;
 
-        let text = response.text.trim().to_string();
+        let text = response.content.trim().to_string();
         self.history.push(Message::assistant(text.clone()));
         Ok(text)
     }
@@ -279,13 +279,17 @@ impl Judge for LlmJudge {
             .complete(&request)
             .await
             .map_err(|e| JudgeError(format!("backend error: {e}")))?;
-        parse_judge_response(&response.text)
+        // Adapter-produced `judge_output` is the strong-typed Judge
+        // verdict — the kernel performs no JSON parsing here (see
+        // `AGENTS.md §Verification`). `None` means the adapter found no
+        // parseable Judge output in the model's response.
+        response.judge_output.ok_or_else(|| {
+            JudgeError(format!(
+                "adapter produced no judge_output; verbatim content was: {}",
+                response.content
+            ))
+        })
     }
-}
-
-pub(crate) fn parse_judge_response(text: &str) -> Result<JudgeOutput, JudgeError> {
-    serde_json::from_str::<JudgeOutput>(text.trim())
-        .map_err(|e| JudgeError(format!("response parse failure: {e}")))
 }
 
 #[derive(Debug)]

@@ -9,10 +9,12 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use chartered_core::{
-    build_charter, build_role_context, load_charter_def, load_role_context_def, CharterDef,
-    CharterLoadError, GovernanceMode, RoleContextDef,
+    build_charter, build_role_context, CharterDef, CharterLoadError, GovernanceMode,
+    RoleContextDef, Skill,
 };
 use serde::Deserialize;
+
+use crate::charter_loader::{load_charter_def, load_role_context_def, load_skills};
 
 #[derive(Debug, Clone)]
 pub struct ConfigError(pub String);
@@ -40,6 +42,7 @@ pub enum BackendKind {
     Fake,
     #[serde(rename = "openai")]
     OpenAi,
+    Gemini,
 }
 
 /// Per-deployment runtime configuration. The governance mode is the
@@ -157,10 +160,22 @@ pub struct DeploymentConfig {
     pub role_context_def: Option<RoleContextDef>,
     pub tools: Vec<ToolRegistration>,
     pub role_context_version: u64,
+    /// Skills loaded from `<charter_dir>/skills/*.md`. Empty when the
+    /// directory is absent. Spec §Skills.
+    pub skills: Vec<Skill>,
 }
 
 impl DeploymentConfig {
-    pub fn build_charter<F>(self, evaluator_factory: F) -> (chartered_core::Charter, chartered_core::RoleContext)
+    /// Build Charter, Role context, and the Skills bound to the Snapshot.
+    /// Returns a tuple so the caller can compose a `Snapshot::new`.
+    pub fn build_charter<F>(
+        self,
+        evaluator_factory: F,
+    ) -> (
+        chartered_core::Charter,
+        chartered_core::RoleContext,
+        Vec<Skill>,
+    )
     where
         F: FnMut(&chartered_core::FrameDef) -> std::sync::Arc<dyn chartered_core::Evaluator>,
     {
@@ -169,7 +184,7 @@ impl DeploymentConfig {
             Some(def) => build_role_context(def, self.role_context_version),
             None => chartered_core::RoleContext::empty(),
         };
-        (charter, role_context)
+        (charter, role_context, self.skills)
     }
 }
 
@@ -208,6 +223,7 @@ pub fn load(chartered_dir: &Path) -> Result<DeploymentConfig, ConfigError> {
 
     let charter_dir = resolve_charter_path(chartered_dir, &charter_ref.path)?;
     let charter_def = load_charter_def(&charter_dir)?;
+    let skills = load_skills(&charter_dir).map_err(|e| ConfigError(e.to_string()))?;
 
     let role_context_path = chartered_dir.join("role_context.md");
     let role_context_def = if role_context_path.is_file() {
@@ -230,6 +246,7 @@ pub fn load(chartered_dir: &Path) -> Result<DeploymentConfig, ConfigError> {
         role_context_def,
         tools,
         role_context_version,
+        skills,
     })
 }
 

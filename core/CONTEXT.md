@@ -44,20 +44,23 @@ The components that close the negative-feedback loop:
 - **Test-grade Tool implementations**: `harness` module. In-memory
   only — `MessageLog`, `InMemoryFs`, `ReviewQueue`. Used by kernel
   tests and the Runtime binary's scenario mode.
-- **Charter loader**: `charter_loader` (charter_loader.rs). Two-stage
-  construction — `load_charter_def` / `load_role_context_def` parse
-  `frames.toml` + `scopes.md` / `role_context.md` into data-only
-  shapes; `build_charter` / `build_role_context` materialize the
-  runtime types by attaching Evaluator instances and version numbers.
-  Markdown sections become slugified scope names. Format documented
+- **Charter parsers**: `charter_loader` (charter_loader.rs). Two-stage
+  construction — `parse_charter_def` / `parse_role_context_def` accept
+  already-loaded text (no filesystem dependency) and produce data-only
+  shapes; `build_charter` / `build_role_context` materialize the runtime
+  types by attaching Evaluator instances and version numbers. Markdown
+  sections become slugified scope names. Filesystem IO that reads
+  `frames.toml` / `scopes.md` / `behavioral_spec.md` / `role_context.md`
+  / `skills/*.md` lives in `runtime::charter_loader`. Format documented
   in `examples/charters/CONTEXT.md`.
 
 ## What does NOT live here
 
-- Stdlib effect surfaces (`std::fs`, `std::process`, `tokio::net`).
-  This crate is in-memory only. OS-touching ToolExecutors live in
-  `dispatch/`. The file-backed Receipt store and the cognition log
-  live in `runtime/src/persistence.rs`.
+- Stdlib effect surfaces (`std::fs`, `std::process`, `tokio::fs`,
+  `tokio::process`, `tokio::net`). This crate is in-memory only;
+  filesystem IO for Charter loading lives in `runtime::charter_loader`;
+  OS-touching ToolExecutors live in `dispatch/`; the file-backed
+  Receipt store and the cognition log live in `runtime/src/persistence.rs`.
 - Real LLM backends. Step 2 adds OpenAI / Anthropic / vLLM / SGLang
   as sibling implementations of `CognitionBackend`.
 - E2E scenario tests. Those live in `runtime/tests/` and target the

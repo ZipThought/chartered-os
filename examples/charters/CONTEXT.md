@@ -2,7 +2,7 @@
 
 Concrete Charter templates per domain. Spec §Tools and §Reference
 Charters point here. Inherits root `CONTEXT.md`. Loaded by
-`core::charter_loader::load_charter_def`.
+`runtime::charter_loader::load_charter_def`.
 
 ## Domains
 

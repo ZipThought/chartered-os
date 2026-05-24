@@ -8,7 +8,7 @@ import "v1/receipt.proto";
 // Runtime ↔ Gate ↔ Daemon messages. See docs/SPECIFICATION.md > The Loop, > Receipts.
 message EvaluateRequest {
   ToolCall tool_call = 1;        // tool_call.source_id identifies the Steward
-  string charter_instance_id = 2;
+  string snapshot_id = 2;        // the content-addressed Snapshot the loop is running under
 }
 
 message EvaluateResponse {

@@ -14,7 +14,7 @@
 use std::path::PathBuf;
 
 use chartered_core::{ArtifactId, ArtifactRange, SelectionAction, SelectionActionKind};
-use chartered_runtime::run;
+use chartered_runtime::{print_charter, run};
 
 #[tokio::main]
 async fn main() {
@@ -31,6 +31,7 @@ async fn main() {
 async fn dispatch(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let mut opts = run::Options::default();
     let mut selection = SelectionArgs::default();
+    let mut print_charter_mode = false;
     let mut i = 1;
     while i < args.len() {
         let arg = &args[i];
@@ -39,6 +40,10 @@ async fn dispatch(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
                 .ok_or_else(|| format!("missing value for {arg}").into())
         };
         match arg.as_str() {
+            "--print-charter" => {
+                print_charter_mode = true;
+                i += 1;
+            }
             "--user-message" => {
                 opts.user_message = Some(value()?.clone());
                 i += 2;
@@ -111,6 +116,9 @@ async fn dispatch(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     opts.selection_trigger = selection.finish()?;
+    if print_charter_mode {
+        return print_charter::print(opts.chartered_dir);
+    }
     run::run(opts).await
 }
 
@@ -180,4 +188,7 @@ fn usage() {
     eprintln!("  --selection-action <name>      action label, e.g. Refine or Review");
     eprintln!("  --selection-kind <kind>        generative or evaluative");
     eprintln!("  --refinement-budget <n>        default: 3");
+    eprintln!(
+        "  --print-charter                emit parsed Charter as JSON to stdout and exit"
+    );
 }

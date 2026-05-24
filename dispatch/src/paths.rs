@@ -19,7 +19,7 @@ pub struct DeploymentPaths {
     pub workspace_root: PathBuf,
     /// Deployment configuration + audit state (`charter/`, `tools/` /
     /// `backends/`, `runs/<id>/{receipts,cognition}.jsonl`,
-    /// `findings.jsonl`, `role_context.md`). Distinct from
+    /// `records.jsonl`, `role_context.md`). Distinct from
     /// `workspace_root`: deployments may point them at independent paths.
     pub chartered_dir: PathBuf,
 }

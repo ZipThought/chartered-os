@@ -1,5 +1,5 @@
 # Charter: medical-reception
-# Spec §Reference Charters; loaded by core::charter_loader::load_charter_def.
+# Spec §Reference Charters; loaded by runtime::charter_loader::load_charter_def.
 #
 # Worked example throughout the spec (§The Loop, §Structural
 # Separation). All declared scopes here are RoleContext: the practice

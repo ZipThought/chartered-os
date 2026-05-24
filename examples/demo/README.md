@@ -13,10 +13,11 @@ persona will.
 - A real-shape persona workspace (M&A) is just `(directory + Charter
   + Steward graph)` running on the unchanged kernel.
 - The Tool ABI is fixed at `read_artifact` / `modify_artifact` /
-  `list_artifacts` / `record_finding`; substrate variation is below
-  the line, in ArtifactBackends. The same dashboard, same runtime,
-  same Receipts trail as the existing text-blob demo.
-- Findings flow into a `kind=findings-store` artifact; text artifacts
+  `list_artifacts`; substrate variation is below the line, in
+  ArtifactBackends (`kind=text` for memos and data-room files,
+  `kind=record-store` for the audit log). The same dashboard, same
+  runtime, same Receipts trail as the existing text-blob demo.
+- Findings flow into a `kind=record-store` artifact; text artifacts
   are `kind=text`; both reached through the same Tools, dispatched by
   kind explicitly, no ownership heuristic.
 - The Charter's Steward-owned Frames make the diligence Steward auditable: every
@@ -48,15 +49,15 @@ Then open http://127.0.0.1:5177.
 Environment overrides:
 ```bash
 PORT=5180 ./examples/demo/run.sh                          # alternate port
-LLM_BASE_URL=http://<host-ip>:1234/v1 ./examples/demo/run.sh  # dynamic host endpoint
-LLM_BASE_URL=https://api.openai.com/v1 \
-  LLM_MODEL=gpt-4o-mini \
-  LLM_API_KEY=sk-... \
+OPEN_AI_BASE_URL=http://<host-ip>:1234/v1 ./examples/demo/run.sh  # dynamic host endpoint
+OPEN_AI_BASE_URL=https://api.openai.com/v1 \
+  OPEN_AI_MODEL=gpt-4o-mini \
+  OPEN_AI_API_KEY=sk-... \
   ./examples/demo/run.sh                                   # OpenAI hosted
 PROFILE=release ./examples/demo/run.sh                     # release build
 ```
 
-The launcher resets `findings.jsonl` and the per-run Receipt trail on
+The launcher resets `records.jsonl` and the per-run Receipt trail on
 each invocation so the demo starts from a clean state.
 
 ## Walkthrough
@@ -88,9 +89,10 @@ The memo updates in place if the Outcome is `Allowed`.
 1. Open `data-room/customer-northstar.md`.
 2. Select Section 11.1 (the change-of-control assignment clause).
 3. Click **Review**.
-4. The Steward proposes a `record_finding` Tool call. The Gate evaluates
-   citation grounding, diligence discipline, and severity calibration.
-   On `Allowed`, a Finding is appended to the `findings-store` artifact
+4. The Steward proposes a `modify_artifact` Tool call with
+   `kind=record-store`. The Gate evaluates citation grounding,
+   diligence discipline, and severity calibration. On `Allowed`, the
+   appended finding lands in the `record-store` artifact `records`
    (visible in the left-rail Findings node).
 
 Try the same on `data-room/apa-draft-v3.md` Section 8.1 (the MAC
@@ -168,7 +170,6 @@ examples/demo/
     │   └── scopes.md            Charter scopes the Frames evaluate against
     └── tools/
         ├── modify_artifact.toml
-        ├── record_finding.toml
         ├── read_artifact.toml
         └── list_artifacts.toml
 ```
@@ -179,4 +180,4 @@ examples/demo/
 - `core/src/artifact.rs` (`ArtifactStore`, `ArtifactBackend`,
   kind-typed dispatch).
 - `dispatch/src/artifact.rs` (`FilesystemTextBackend`,
-  `FilesystemFindingsBackend`).
+  `FilesystemRecordStore`).

@@ -34,6 +34,7 @@ use crate::governance::GovernanceMode;
 pub fn assemble_actor_system_prompt(
     charter: &Charter,
     role_context: &RoleContext,
+    skills: &[crate::skill::Skill],
     mode: GovernanceMode,
 ) -> String {
     let mut s = String::new();
@@ -44,13 +45,17 @@ pub fn assemble_actor_system_prompt(
     // ungoverned. The base line is invariant across Charters.
     s.push_str(
         "You are a chartered Steward in the CharteredOS runtime. Every \
-         external effect you take is a Tool call. Reply with one Action \
-         JSON object per turn: \
+         external effect you take is a Tool call. \
+         You may think across several replies before committing — reply \
+         with free-form reasoning to think more, and reply with one Action \
+         JSON object when you are ready to act: \
          `{\"tool\":\"<id>\",\"params\":{...}}` to invoke a Tool, or \
-         `{\"halt\":true}` when the Task is complete. The Gate evaluates \
-         every Tool call against the active Charter before any effect \
-         takes place; on rejection you receive a Refinement signal naming \
-         the failing Frame and a one-sentence reason.\n\n",
+         `{\"halt\":true}` when the Task is complete. \
+         Only Action JSON commits; reasoning replies stay internal to your \
+         turn. The Gate evaluates every Tool call against the active \
+         Charter before any effect takes place; on rejection you receive a \
+         Refinement signal naming the failing Frame and a one-sentence \
+         reason.\n\n",
     );
 
     // Charter behavioral spec — how this particular Steward
@@ -85,6 +90,18 @@ pub fn assemble_actor_system_prompt(
                 s.push_str(&format!("[{name}]\n{}\n\n", content.trim()));
             }
         }
+
+        // Skills are Actor-side cognition instrumentation (spec
+        // §Skills): they steer how the Actor approaches the task.
+        // They do NOT carry authority (no expansion of permitted_tools,
+        // no Gate bypass) — every tool call the Actor emits under a
+        // Skill's influence still crosses the Gate.
+        if !skills.is_empty() {
+            s.push_str("--- SKILLS (Actor-side guidance; tool calls still cross the Gate) ---\n");
+            for skill in skills {
+                s.push_str(&format!("[{}]\n{}\n\n", skill.id, skill.content.trim()));
+            }
+        }
     }
 
     s.push_str(&format!("--- GOVERNANCE MODE ---\n{mode}\n"));
@@ -114,6 +131,7 @@ mod tests {
         let prompt = assemble_actor_system_prompt(
             &charter,
             &RoleContext::empty(),
+            &[],
             GovernanceMode::EVALUATION_ONLY,
         );
         assert!(prompt.contains("BEHAVIORAL SPECIFICATION"));
@@ -128,6 +146,7 @@ mod tests {
         let with_grounding = assemble_actor_system_prompt(
             &charter,
             &RoleContext::empty(),
+            &[],
             GovernanceMode::FULL,
         );
         assert!(with_grounding.contains("AUTHORITY SCOPES"));
@@ -136,6 +155,7 @@ mod tests {
         let without_grounding = assemble_actor_system_prompt(
             &charter,
             &RoleContext::empty(),
+            &[],
             GovernanceMode::EVALUATION_ONLY,
         );
         assert!(!without_grounding.contains("AUTHORITY SCOPES"));
@@ -151,6 +171,7 @@ mod tests {
         let with_grounding = assemble_actor_system_prompt(
             &charter,
             &role_context,
+            &[],
             GovernanceMode::FULL,
         );
         assert!(with_grounding.contains("ROLE CONTEXT"));
@@ -159,6 +180,7 @@ mod tests {
         let without_grounding = assemble_actor_system_prompt(
             &charter,
             &role_context,
+            &[],
             GovernanceMode::NEITHER,
         );
         assert!(!without_grounding.contains("ROLE CONTEXT"));
@@ -171,8 +193,41 @@ mod tests {
         let prompt = assemble_actor_system_prompt(
             &charter,
             &RoleContext::empty(),
+            &[],
             GovernanceMode::GROUNDING_ONLY,
         );
         assert!(prompt.contains("grounding-only"));
+    }
+
+    #[test]
+    fn skills_appear_under_grounding_with_skill_section() {
+        let charter = empty_charter_with_behavioral("");
+        let skills = vec![crate::skill::Skill::new(
+            "billing-triage",
+            "When pricing is ambiguous, ask for clarification before quoting.",
+        )];
+        let prompt = assemble_actor_system_prompt(
+            &charter,
+            &RoleContext::empty(),
+            &skills,
+            GovernanceMode::FULL,
+        );
+        assert!(prompt.contains("SKILLS"));
+        assert!(prompt.contains("[billing-triage]"));
+        assert!(prompt.contains("ask for clarification"));
+    }
+
+    #[test]
+    fn skills_absent_when_grounding_off() {
+        let charter = empty_charter_with_behavioral("");
+        let skills = vec![crate::skill::Skill::new("s", "guidance content")];
+        let prompt = assemble_actor_system_prompt(
+            &charter,
+            &RoleContext::empty(),
+            &skills,
+            GovernanceMode::EVALUATION_ONLY,
+        );
+        assert!(!prompt.contains("SKILLS"));
+        assert!(!prompt.contains("guidance content"));
     }
 }

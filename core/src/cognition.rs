@@ -71,29 +71,68 @@ pub struct CognitionRequest {
     pub max_output_tokens: Option<u32>,
 }
 
-/// Adapter-canonicalized assistant response. `text` is the bare body
-/// the role consumes for line-based or JSON parsing — adapters strip
-/// vendor envelopes (gpt-oss harmony, markdown fences, etc.) before
-/// returning. `tool_call_hint` is set when the wire format separated
-/// the tool name from its params (harmony `to=` header + JSON body,
-/// OpenAI native `tool_calls`, etc.) — the Actor consumes the hint
-/// directly without re-parsing `text`.
+/// Adapter-canonicalized assistant response. Distinct fields by
+/// ontology, not duplication:
+///   - `content` is the verbatim assistant output (whatever the model
+///     emitted as its message). Kept for `cognition.jsonl` so operators
+///     see what the model actually said, and appended to the Actor's
+///     history so the LLM sees its own prior reasoning on the next
+///     inner step. The kernel does NOT parse it.
+///   - `action_hint`, `verdict_lines`, `judge_output` are the role-
+///     specific strong types the adapter extracted from whichever wire
+///     shape the vendor used (harmony envelope, plain prose, vendor-
+///     native tool-call fields, etc.). Each role-consumer (Actor,
+///     Evaluator, Judge) reads its relevant field directly — the
+///     kernel performs no text or JSON parsing.
+///
+/// Adapters populate the fields they have evidence for; consumers that
+/// don't see their field treat it as "the response was content-only
+/// for this role" (Actor: continue inner loop; Evaluator: no verdict
+/// produced — Gate's empty-trace fallback applies; Judge: same).
 #[derive(Debug, Clone, Serialize)]
 pub struct CognitionResponse {
-    pub text: String,
+    pub content: String,
     pub input_tokens: u32,
     pub output_tokens: u32,
     pub cache_hit_tokens: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub tool_call_hint: Option<ToolCallHint>,
+    pub action_hint: Option<ActionHint>,
+    /// Strong-typed Evaluator output the adapter extracted from
+    /// content. One entry per decision the model emitted. Empty when
+    /// the adapter found none (pure prose, no recognizable decision).
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub verdict_lines: Vec<DecisionLine>,
+    /// Strong-typed Judge output the adapter extracted from content.
+    /// `None` when the adapter found no parseable Judge output.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub judge_output: Option<crate::scenario::JudgeOutput>,
 }
 
-/// Adapter-extracted structured tool call. When present, the Actor
-/// builds a `ToolCall` from this directly without parsing `text`.
+/// One adapter-extracted Evaluator decision line. The adapter produces
+/// these without knowing which Evaluator role is consuming them; the
+/// LlmEvaluator stamps its own `evaluator_id` when wrapping these
+/// into `EvaluatorEntry` for the Gate.
 #[derive(Debug, Clone, Serialize)]
-pub struct ToolCallHint {
-    pub tool: String,
-    pub params: serde_json::Value,
+pub struct DecisionLine {
+    pub decision: crate::verdict::Decision,
+    pub observation: String,
+}
+
+/// Strong-typed Action surface that the adapter produces from a vendor
+/// response. The Actor consumes this directly — there is no JSON-from-
+/// string fallback in the kernel.
+///
+/// `Propose.params` is `serde_json::Value` because params are dynamic
+/// per Tool (the kernel doesn't know all Tools' schemas — the executor
+/// deserializes into its specific shape). Everything else is typed.
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ActionHint {
+    Propose {
+        tool: String,
+        params: serde_json::Value,
+    },
+    Halt,
 }
 
 #[derive(Debug, Clone)]
@@ -143,48 +182,85 @@ impl FakeCognitionBackend {
         }
     }
 
-    /// Enqueue a canonical text response.
-    pub fn enqueue(&self, text: impl Into<String>) -> &Self {
-        self.queue.lock().unwrap().push_back(CognitionResponse {
-            text: text.into(),
-            input_tokens: 0,
-            output_tokens: 0,
-            cache_hit_tokens: 0,
-            tool_call_hint: None,
-        });
+    /// Enqueue a pure-reasoning response — `action_hint` is `None`.
+    /// The Actor treats this as an inner-loop reasoning step and
+    /// continues without committing an Action.
+    pub fn enqueue(&self, content: impl Into<String>) -> &Self {
+        self.queue.lock().unwrap().push_back(content_only(content.into()));
         self
     }
 
-    /// Enqueue a structured tool-call hint. Used to simulate adapters
-    /// that pre-extract `(tool, params)` from a tool-use wire format.
-    pub fn enqueue_hint(&self, tool: impl Into<String>, params: serde_json::Value) -> &Self {
-        self.queue.lock().unwrap().push_back(CognitionResponse {
-            text: String::new(),
-            input_tokens: 0,
-            output_tokens: 0,
-            cache_hit_tokens: 0,
-            tool_call_hint: Some(ToolCallHint {
-                tool: tool.into(),
-                params,
-            }),
-        });
+    /// Enqueue a structured Action response — what the adapter would
+    /// have canonicalized from a vendor wire shape. The Actor commits
+    /// immediately on this. `content` is auto-derived for
+    /// `cognition.jsonl` visibility (and so the Actor's history shows
+    /// the action the model emitted).
+    pub fn enqueue_action(&self, action: ActionHint) -> &Self {
+        let content = match &action {
+            ActionHint::Halt => r#"{"halt":true}"#.to_string(),
+            ActionHint::Propose { tool, params } => {
+                serde_json::json!({ "tool": tool, "params": params }).to_string()
+            }
+        };
+        let mut r = content_only(content);
+        r.action_hint = Some(action);
+        self.queue.lock().unwrap().push_back(r);
+        self
+    }
+
+    /// Enqueue an explicit (content, action_hint) pair. Used by the
+    /// runtime when configuring fake backends from TOML
+    /// `fake_responses` — the strings stay JSON-shaped for operator
+    /// ergonomics, and the runtime canonicalizes each into an
+    /// `ActionHint` before enqueueing.
+    pub fn enqueue_with_action(
+        &self,
+        content: impl Into<String>,
+        action_hint: Option<ActionHint>,
+    ) -> &Self {
+        let mut r = content_only(content.into());
+        r.action_hint = action_hint;
+        self.queue.lock().unwrap().push_back(r);
+        self
+    }
+
+    /// Enqueue a strong-typed Evaluator response — the adapter
+    /// equivalent for fake-LLM tests. `content` auto-derived so the
+    /// cognition.jsonl record reflects what a real model would have
+    /// emitted (line-shaped DECISION text).
+    pub fn enqueue_verdict_lines(&self, lines: Vec<DecisionLine>) -> &Self {
+        let content = lines
+            .iter()
+            .map(|l| format!("{}: {}", decision_to_keyword(l.decision), l.observation))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut r = content_only(content);
+        r.verdict_lines = lines;
+        self.queue.lock().unwrap().push_back(r);
+        self
+    }
+
+    /// Enqueue a strong-typed Judge response.
+    pub fn enqueue_judge_output(&self, output: crate::scenario::JudgeOutput) -> &Self {
+        let content = serde_json::to_string(&output).unwrap_or_default();
+        let mut r = content_only(content);
+        r.judge_output = Some(output);
+        self.queue.lock().unwrap().push_back(r);
         self
     }
 
     pub fn enqueue_with_tokens(
         &self,
-        text: impl Into<String>,
+        content: impl Into<String>,
         input_tokens: u32,
         output_tokens: u32,
         cache_hit_tokens: u32,
     ) -> &Self {
-        self.queue.lock().unwrap().push_back(CognitionResponse {
-            text: text.into(),
-            input_tokens,
-            output_tokens,
-            cache_hit_tokens,
-            tool_call_hint: None,
-        });
+        let mut r = content_only(content.into());
+        r.input_tokens = input_tokens;
+        r.output_tokens = output_tokens;
+        r.cache_hit_tokens = cache_hit_tokens;
+        self.queue.lock().unwrap().push_back(r);
         self
     }
 
@@ -196,6 +272,32 @@ impl FakeCognitionBackend {
     /// served, in call order. Lets tests inspect what the role assembled.
     pub fn calls(&self) -> Vec<CognitionRequest> {
         self.calls.lock().unwrap().clone()
+    }
+}
+
+/// Construct a `CognitionResponse` that carries only verbatim content
+/// — no role-specific strong types. The Actor's inner loop treats this
+/// as a reasoning step; the Evaluator's empty-trace path applies; the
+/// Judge sees no parseable output. Used by every `enqueue_*` variant
+/// as the base before stamping the relevant role's strong type.
+fn content_only(content: String) -> CognitionResponse {
+    CognitionResponse {
+        content,
+        input_tokens: 0,
+        output_tokens: 0,
+        cache_hit_tokens: 0,
+        action_hint: None,
+        verdict_lines: Vec::new(),
+        judge_output: None,
+    }
+}
+
+fn decision_to_keyword(d: crate::verdict::Decision) -> &'static str {
+    match d {
+        crate::verdict::Decision::Allow => "ALLOW",
+        crate::verdict::Decision::Deny => "DENY",
+        crate::verdict::Decision::Escalate => "ESCALATE",
+        crate::verdict::Decision::Defer => "DEFER",
     }
 }
 

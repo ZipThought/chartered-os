@@ -1,10 +1,17 @@
-//! Real-LLM end-to-end tests against the chartered-runtime binary.
+//! E2e tests — actual full agent loop, real LLM, production transport.
 //!
-//! Same code path as the fake-mode E2E in `e2e.rs` — only the
-//! `backend` value in `steward.toml` differs. The deployments are
-//! real production deployments configured for `backend = "openai"`,
-//! reading `LLM_BASE_URL` / `LLM_MODEL` / `LLM_API_KEY` from
-//! environment (loaded by the binary via `dotenvy::dotenv()`).
+//! Per `AGENTS.md §Verification`, e2e tests are local-only and every
+//! test in this file is `#[ignore]`d so default `cargo test` skips
+//! them. Opt-in via `cargo test -- --ignored`. No soft-skip — a runner
+//! that fires these tests intentionally opted in and must see real
+//! failures.
+//!
+//! Same code path as the fake-mode binary integration in
+//! `binary_integration.rs` — only the `backend` value in
+//! `steward.toml` differs. The deployments are real production
+//! deployments configured for `backend = "openai"`, reading
+//! `OPEN_AI_BASE_URL` / `OPEN_AI_MODEL` / `OPEN_AI_API_KEY` from environment
+//! (loaded by the binary via `dotenvy::dotenv()`).
 //!
 //! Both real OpenAI and local OpenAI-compatible servers (LM Studio,
 //! llama.cpp server, vLLM, SGLang) work through the same
@@ -13,8 +20,8 @@
 //! `CHARTERED_LOCAL_LM_BASE_URL` when the local server is reachable
 //! through a host-specific dynamic address.
 //!
-//! Environment files are explicit test inputs. Missing `LLM_BASE_URL`
-//! or `LLM_MODEL` in the selected file is a test failure.
+//! Environment files are explicit test inputs. Missing `OPEN_AI_BASE_URL`
+//! or `OPEN_AI_MODEL` in the selected file is a test failure.
 
 mod common;
 
@@ -139,10 +146,21 @@ declared_scopes = [
     )
 }
 
-fn steward_openai(actor_model_override: Option<&str>) -> String {
+/// Map an `LlmEnv` to the `backend = "..."` string used inside its
+/// `steward.toml` fixture. `openai` / `local_lm` both target the
+/// OpenAI-compatible wire format, so both yield `"openai"`; `gemini`
+/// targets the native generativelanguage API.
+fn steward_backend(target: &LlmEnv) -> &'static str {
+    match target.name {
+        "gemini" => "gemini",
+        _ => "openai",
+    }
+}
+
+fn steward_for_backend(backend: &str, actor_model_override: Option<&str>) -> String {
     let actor_block = match actor_model_override {
-        Some(m) => format!("[actor]\nbackend = \"openai\"\nmodel = \"{m}\"\n"),
-        None => "[actor]\nbackend = \"openai\"\n".to_string(),
+        Some(m) => format!("[actor]\nbackend = \"{backend}\"\nmodel = \"{m}\"\n"),
+        None => format!("[actor]\nbackend = \"{backend}\"\n"),
     };
     format!(
         r#"system_prompt = """
@@ -156,29 +174,30 @@ tool_registry = ["write_file.toml"]
 
 {actor_block}
 [evaluator]
-backend = "openai"
+backend = "{backend}"
 "#
     )
 }
 
-fn steward_openai_artifacts() -> String {
-    r#"system_prompt = """
+fn steward_artifacts_for_backend(backend: &str) -> String {
+    format!(
+        r#"system_prompt = """
 You are a chartered workspace Steward. Reply only with JSON Action objects.
 For Refine or Expand, call:
-{"tool":"modify_artifact","params":{"kind":"text","artifact_id":"<id>","range":{"start":0,"end":0,"start_line":1,"end_line":1},"replacement":"<text>","summary":"<professional summary>"}}
+{{"tool":"modify_artifact","params":{{"kind":"text","artifact_id":"<id>","range":{{"start":0,"end":0,"start_line":1,"end_line":1}},"replacement":"<text>","summary":"<professional summary>"}}}}
 For Review, call:
-{"tool":"record_finding","params":{"artifact_id":"<id>","range":{"start":0,"end":0,"start_line":1,"end_line":1},"concern":"<concern>","severity":"low|medium|high","detail":"<detail>"}}
+{{"tool":"modify_artifact","params":{{"kind":"record-store","artifact_id":"records","edit":{{"append":{{"artifact_id":"<id>","range":{{"start":0,"end":0,"start_line":1,"end_line":1}},"concern":"<concern>","severity":"low|medium|high","detail":"<detail>"}}}}}}}}
 Use the artifact_id and range from the selection trigger. Halt after one successful allowed action.
 """
-tool_registry = ["modify_artifact.toml", "record_finding.toml", "read_artifact.toml", "list_artifacts.toml"]
+tool_registry = ["modify_artifact.toml", "read_artifact.toml", "list_artifacts.toml"]
 
 [actor]
-backend = "openai"
+backend = "{backend}"
 
 [evaluator]
-backend = "openai"
+backend = "{backend}"
 "#
-    .into()
+    )
 }
 
 fn write_artifact_tools(dep: &TestDeployment) {
@@ -187,12 +206,6 @@ fn write_artifact_tools(dep: &TestDeployment) {
         "modify_artifact",
         "native_artifact_modify",
         "modify_artifact",
-    );
-    write_tool(
-        dep,
-        "record_finding",
-        "native_artifact_record_finding",
-        "record_finding",
     );
     write_tool(
         dep,
@@ -228,7 +241,19 @@ impl LlmEnv {
         Self {
             name: "local_lm",
             file: ".env.dev",
-            overrides: BTreeMap::from([("LLM_API_KEY".to_string(), String::new())]),
+            overrides: BTreeMap::from([("OPEN_AI_API_KEY".to_string(), String::new())]),
+        }
+    }
+
+    /// Gemini cloud — Google's native generativelanguage API. Reads
+    /// `GEMINI_API_KEY` and `GEMINI_MODEL_ID` from `.env`. Distinct
+    /// from `openai` (different backend wire shape, different env-var
+    /// surface).
+    fn gemini() -> Self {
+        Self {
+            name: "gemini",
+            file: ".env",
+            overrides: BTreeMap::new(),
         }
     }
 
@@ -245,23 +270,38 @@ impl LlmEnv {
         for (k, v) in &self.overrides {
             env.insert(k.clone(), v.clone());
         }
-        if self.name == "local_lm" {
-            if let Ok(base_url) = std::env::var("CHARTERED_LOCAL_LM_BASE_URL") {
-                if !base_url.is_empty() {
-                    env.insert("LLM_BASE_URL".into(), base_url);
-                }
-            }
+        if self.name == "local_lm"
+            && let Ok(base_url) = std::env::var("CHARTERED_LOCAL_LM_BASE_URL")
+            && !base_url.is_empty()
+        {
+            env.insert("OPEN_AI_BASE_URL".into(), base_url);
         }
-        assert!(
-            env.get("LLM_BASE_URL").is_some_and(|v| !v.is_empty()),
-            "{} must define LLM_BASE_URL",
-            self.file
-        );
-        assert!(
-            env.get("LLM_MODEL").is_some_and(|v| !v.is_empty()),
-            "{} must define LLM_MODEL",
-            self.file
-        );
+        // Vendor-specific env-var assertions. The gemini path requires
+        // GEMINI_API_KEY + GEMINI_MODEL_ID; the openai/local_lm paths
+        // require OPEN_AI_BASE_URL + OPEN_AI_MODEL.
+        if self.name == "gemini" {
+            assert!(
+                env.get("GEMINI_API_KEY").is_some_and(|v| !v.is_empty()),
+                "{} must define GEMINI_API_KEY",
+                self.file
+            );
+            assert!(
+                env.get("GEMINI_MODEL_ID").is_some_and(|v| !v.is_empty()),
+                "{} must define GEMINI_MODEL_ID",
+                self.file
+            );
+        } else {
+            assert!(
+                env.get("OPEN_AI_BASE_URL").is_some_and(|v| !v.is_empty()),
+                "{} must define OPEN_AI_BASE_URL",
+                self.file
+            );
+            assert!(
+                env.get("OPEN_AI_MODEL").is_some_and(|v| !v.is_empty()),
+                "{} must define OPEN_AI_MODEL",
+                self.file
+            );
+        }
         env
     }
 }
@@ -336,14 +376,36 @@ fn persist_output(target: &LlmEnv, name: &str, out: &std::process::Output) {
         &out.stderr,
     )
     .unwrap();
+    // Also copy cognition.jsonl out of the per-run tempdir so it
+    // survives `TempDir::drop` and operators can grep the verbatim LLM
+    // exchanges after a failure.
+    if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&out.stdout)
+        && let Some(cog_path) = v["cognition_log"].as_str()
+        && let Ok(cog) = std::fs::read(cog_path)
+    {
+        let _ = std::fs::write(
+            temp.join(format!("llm_e2e_{}_{}.cognition.jsonl", target.name, name)),
+            cog,
+        );
+    }
 }
 
 #[test]
+#[ignore = "e2e: requires real LLM at $OPEN_AI_BASE_URL with $OPEN_AI_API_KEY; opt-in via `cargo test -- --ignored`"]
 fn llm_e2e_openai_writes_requested_file_then_halts() {
+    writes_requested_file_then_halts_strict(LlmEnv::openai(), "hello.txt");
+}
+
+#[test]
+#[ignore = "e2e: requires Gemini at $GEMINI_API_KEY + $GEMINI_MODEL_ID; opt-in via `cargo test -- --ignored`"]
+fn llm_e2e_gemini_writes_requested_file_then_halts() {
+    writes_requested_file_then_halts_strict(LlmEnv::gemini(), "hello.txt");
+}
+
+fn writes_requested_file_then_halts_strict(target: LlmEnv, expected_filename: &str) {
     let _guard = llm_e2e_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let target = LlmEnv::openai();
 
     let dep = TestDeployment::new();
     dep.write_chartered_toml();
@@ -351,25 +413,24 @@ fn llm_e2e_openai_writes_requested_file_then_halts() {
     dep.write_charter(frames_toml_basic(), SCOPES_MD_BASIC);
     dep.write_role_context_md();
     write_tool(&dep, "write_file", "native_fs_write", "write_file");
-    dep.write("steward.toml", &steward_openai(None));
+    dep.write("steward.toml", &steward_for_backend(steward_backend(&target), None));
 
-    let out = run_with_user_message_env(
-        &dep,
-        &target,
-        "Please create a file named hello.txt containing exactly the text \
-         `hi from chartered-runtime` and then halt.",
+    let user_message = format!(
+        "Please create a file named {expected_filename} containing exactly the text \
+         `hi from chartered-runtime` and then halt."
     );
+    let out = run_with_user_message_env(&dep, &target, &user_message);
     persist_output(&target, "writes_requested_file_then_halts", &out);
 
-    if !out.status.success() {
-        eprintln!(
-            "real-LLM run did not succeed (this can happen on cold local \
-             models). stdout:\n{}\nstderr:\n{}",
-            String::from_utf8_lossy(&out.stdout),
-            String::from_utf8_lossy(&out.stderr)
-        );
-        return;
-    }
+    // E2e per AGENTS.md §Verification: tests MUST fail when
+    // preconditions absent. The `#[ignore]` on this test is the only
+    // gate — a runner that reaches here intentionally opted in and
+    // must see real failures.
+    assert!(
+        out.status.success(),
+        "real-LLM run did not succeed; stderr:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 
     let v = parse_stdout_json(&out);
     let receipts = v["receipts"].as_array().unwrap();
@@ -387,17 +448,14 @@ fn llm_e2e_openai_writes_requested_file_then_halts() {
         })
         .collect();
     if allowed_writes.is_empty() {
-        eprintln!(
-            "no allowed write_file Receipts; the real LLM may have refused \
-             or the Charter denied. trail:\n{}",
-            serde_json::to_string_pretty(&receipts).unwrap()
-        );
-        // Surface the raw LLM responses so the operator can see why the
-        // evaluator's verdict was empty-trace or unparseable.
+        // Surface the raw LLM responses so the operator can see why
+        // the evaluator's verdict was empty-trace or unparseable, then
+        // fail — e2e is opt-in, so a runner that gets here expects to
+        // see real failures, not soft-skips disguised as passing.
         if let Some(cog_path) = v["cognition_log"].as_str()
             && let Ok(text) = std::fs::read_to_string(cog_path)
         {
-            eprintln!("cognition.jsonl:\n");
+            eprintln!("cognition.jsonl:");
             for line in text.lines() {
                 if let Ok(e) = serde_json::from_str::<serde_json::Value>(line) {
                     eprintln!(
@@ -409,21 +467,23 @@ fn llm_e2e_openai_writes_requested_file_then_halts() {
                 }
             }
         }
-        return;
+        panic!(
+            "no allowed write_file Receipts; the real LLM may have refused \
+             or the Charter denied. trail:\n{}",
+            serde_json::to_string_pretty(&receipts).unwrap()
+        );
     }
 
-    // hello.txt should exist; its content may differ from our exact
-    // string (LLMs paraphrase), so we just assert presence + non-empty.
-    let path = dep.workspace_file("hello.txt");
-    if !path.exists() {
-        eprintln!(
-            "hello.txt missing; LLM may have written elsewhere. workspace files:\n{:?}",
-            list_files_under(&dep.workspace_root)
-        );
-        return;
-    }
+    // expected_filename should exist; its content may differ from our
+    // exact string (LLMs paraphrase), so we just assert presence + non-empty.
+    let path = dep.workspace_file(expected_filename);
+    assert!(
+        path.exists(),
+        "{expected_filename} missing; LLM may have written elsewhere. workspace files:\n{:?}",
+        list_files_under(&dep.workspace_root)
+    );
     let content = std::fs::read_to_string(&path).unwrap();
-    assert!(!content.is_empty(), "hello.txt is empty");
+    assert!(!content.is_empty(), "{expected_filename} is empty");
 
     // cognition.jsonl carries the real prompts and responses.
     let cog_path = std::path::PathBuf::from(v["cognition_log"].as_str().unwrap());
@@ -455,6 +515,7 @@ fn llm_e2e_openai_writes_requested_file_then_halts() {
 }
 
 #[test]
+#[ignore = "e2e: requires local LM at $OPEN_AI_BASE_URL; opt-in via `cargo test -- --ignored`"]
 fn llm_e2e_local_lm_writes_requested_file_then_halts() {
     let _guard = llm_e2e_lock()
         .lock()
@@ -467,7 +528,7 @@ fn llm_e2e_local_lm_writes_requested_file_then_halts() {
     dep.write_charter(frames_toml_basic(), SCOPES_MD_BASIC);
     dep.write_role_context_md();
     write_tool(&dep, "write_file", "native_fs_write", "write_file");
-    dep.write("steward.toml", &steward_openai(None));
+    dep.write("steward.toml", &steward_for_backend(steward_backend(&target), None));
 
     let out = run_with_user_message_env(
         &dep,
@@ -477,20 +538,21 @@ fn llm_e2e_local_lm_writes_requested_file_then_halts() {
     );
     persist_output(&target, "writes_requested_file_then_halts", &out);
 
-    if !out.status.success() {
-        eprintln!(
-            "local-LM run did not succeed; stderr:\n{}",
-            String::from_utf8_lossy(&out.stderr)
-        );
-        return;
-    }
+    assert!(
+        out.status.success(),
+        "local-LM run did not succeed; stderr:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 
     let v = parse_stdout_json(&out);
     let receipts = v["receipts"].as_array().unwrap();
     assert!(!receipts.is_empty());
 
-    // Best-effort assertion: the Steward should have produced at least
-    // one Allowed write_file. We don't pin model behavior beyond that.
+    // E2e tests fail when preconditions are absent (AGENTS.md
+    // §Verification). The Steward must produce at least one Allowed
+    // write_file; an Escalated outcome means the local LM couldn't
+    // produce a parseable Action within the Actor's inner step
+    // budget — a real failure, not a soft-skip.
     let allowed_writes = receipts
         .iter()
         .filter(|r| {
@@ -498,22 +560,29 @@ fn llm_e2e_local_lm_writes_requested_file_then_halts() {
                 && r["tool_call"]["tool"].as_str() == Some("write_file")
         })
         .count();
-    if allowed_writes == 0 {
-        eprintln!(
-            "local LM did not produce any Allowed write_file; trail:\n{}",
-            serde_json::to_string_pretty(&receipts).unwrap()
-        );
-    }
+    assert!(
+        allowed_writes > 0,
+        "local LM did not produce any Allowed write_file; trail:\n{}",
+        serde_json::to_string_pretty(&receipts).unwrap()
+    );
 }
 
 #[test]
+#[ignore = "e2e: requires real LLM at $OPEN_AI_BASE_URL with $OPEN_AI_API_KEY; opt-in via `cargo test -- --ignored`"]
 fn llm_e2e_openai_selection_refine_modifies_artifact() {
     selection_refine_modifies_artifact(LlmEnv::openai());
 }
 
 #[test]
+#[ignore = "e2e: requires local LM at $OPEN_AI_BASE_URL; opt-in via `cargo test -- --ignored`"]
 fn llm_e2e_local_lm_selection_refine_modifies_artifact() {
     selection_refine_modifies_artifact(LlmEnv::local_lm());
+}
+
+#[test]
+#[ignore = "e2e: requires Gemini at $GEMINI_API_KEY + $GEMINI_MODEL_ID; opt-in via `cargo test -- --ignored`"]
+fn llm_e2e_gemini_selection_refine_modifies_artifact() {
+    selection_refine_modifies_artifact(LlmEnv::gemini());
 }
 
 fn selection_refine_modifies_artifact(target: LlmEnv) {
@@ -531,7 +600,7 @@ fn selection_refine_modifies_artifact(target: LlmEnv) {
     write_artifact_tools(&dep);
     let original = "The vendor liability cap is unclear and may not match precedent.";
     std::fs::write(dep.workspace_file("deal.md"), original).unwrap();
-    dep.write("steward.toml", &steward_openai_artifacts());
+    dep.write("steward.toml", &steward_artifacts_for_backend(steward_backend(&target)));
 
     let out = run_selection_env(
         &dep,
@@ -543,14 +612,12 @@ fn selection_refine_modifies_artifact(target: LlmEnv) {
         "generative",
     );
     persist_output(&target, "selection_refine_modifies_artifact", &out);
-    if !out.status.success() {
-        eprintln!(
-            "real selection refine failed; stdout:\n{}\nstderr:\n{}",
-            String::from_utf8_lossy(&out.stdout),
-            String::from_utf8_lossy(&out.stderr)
-        );
-        return;
-    }
+    assert!(
+        out.status.success(),
+        "real selection refine failed; stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
 
     let v = parse_stdout_json(&out);
     let receipts = v["receipts"].as_array().unwrap();
@@ -569,13 +636,21 @@ fn selection_refine_modifies_artifact(target: LlmEnv) {
 }
 
 #[test]
+#[ignore = "e2e: requires real LLM at $OPEN_AI_BASE_URL with $OPEN_AI_API_KEY; opt-in via `cargo test -- --ignored`"]
 fn llm_e2e_openai_selection_review_records_finding() {
     selection_review_records_finding(LlmEnv::openai());
 }
 
 #[test]
+#[ignore = "e2e: requires local LM at $OPEN_AI_BASE_URL; opt-in via `cargo test -- --ignored`"]
 fn llm_e2e_local_lm_selection_review_records_finding() {
     selection_review_records_finding(LlmEnv::local_lm());
+}
+
+#[test]
+#[ignore = "e2e: requires Gemini at $GEMINI_API_KEY + $GEMINI_MODEL_ID; opt-in via `cargo test -- --ignored`"]
+fn llm_e2e_gemini_selection_review_records_finding() {
+    selection_review_records_finding(LlmEnv::gemini());
 }
 
 fn selection_review_records_finding(target: LlmEnv) {
@@ -586,14 +661,14 @@ fn selection_review_records_finding(target: LlmEnv) {
     dep.write_chartered_toml();
     dep.write_charter_ref(1);
     dep.write_charter(
-        &frames_toml_artifact(&["record_finding"]),
+        &frames_toml_artifact(&["modify_artifact"]),
         SCOPES_MD_ARTIFACT,
     );
     dep.write_role_context_md();
     write_artifact_tools(&dep);
     let original = "Public API gateway uses a shared cache without tenant key isolation.";
     std::fs::write(dep.workspace_file("architecture.md"), original).unwrap();
-    dep.write("steward.toml", &steward_openai_artifacts());
+    dep.write("steward.toml", &steward_artifacts_for_backend(steward_backend(&target)));
 
     let out = run_selection_env(
         &dep,
@@ -605,45 +680,52 @@ fn selection_review_records_finding(target: LlmEnv) {
         "evaluative",
     );
     persist_output(&target, "selection_review_records_finding", &out);
-    if !out.status.success() {
-        eprintln!(
-            "real selection review failed; stdout:\n{}\nstderr:\n{}",
-            String::from_utf8_lossy(&out.stdout),
-            String::from_utf8_lossy(&out.stderr)
-        );
-        return;
-    }
+    assert!(
+        out.status.success(),
+        "real selection review failed; stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
 
     let v = parse_stdout_json(&out);
     let receipts = v["receipts"].as_array().unwrap();
     let allowed_finding = receipts.iter().any(|r| {
         r["outcome"].as_str() == Some("Allowed")
-            && r["tool_call"]["tool"].as_str() == Some("record_finding")
+            && r["tool_call"]["tool"].as_str() == Some("modify_artifact")
+            && r["tool_call"]["params"]["kind"].as_str() == Some("record-store")
     });
     assert!(
         allowed_finding,
-        "expected allowed record_finding receipt; trail:\n{}",
+        "expected allowed modify_artifact(kind=record-store) receipt; trail:\n{}",
         serde_json::to_string_pretty(receipts).unwrap()
     );
     assert_eq!(
         std::fs::read_to_string(dep.workspace_file("architecture.md")).unwrap(),
         original
     );
-    let findings =
-        std::fs::read_to_string(dep.workspace_file(".chartered/findings.jsonl")).unwrap();
-    let finding: serde_json::Value = serde_json::from_str(findings.trim()).unwrap();
-    assert!(finding["concern"].as_str().unwrap_or("").len() > 3);
-    assert!(finding["detail"].as_str().unwrap_or("").len() > 3);
+    let records =
+        std::fs::read_to_string(dep.workspace_file(".chartered/records.jsonl")).unwrap();
+    let record: serde_json::Value = serde_json::from_str(records.trim()).unwrap();
+    assert!(record["concern"].as_str().unwrap_or("").len() > 3);
+    assert!(record["detail"].as_str().unwrap_or("").len() > 3);
 }
 
 #[test]
+#[ignore = "e2e: requires real LLM at $OPEN_AI_BASE_URL with $OPEN_AI_API_KEY; opt-in via `cargo test -- --ignored`"]
 fn llm_e2e_openai_selection_reject_refine_or_escalate() {
     selection_reject_refine_or_escalate(LlmEnv::openai());
 }
 
 #[test]
+#[ignore = "e2e: requires local LM at $OPEN_AI_BASE_URL; opt-in via `cargo test -- --ignored`"]
 fn llm_e2e_local_lm_selection_reject_refine_or_escalate() {
     selection_reject_refine_or_escalate(LlmEnv::local_lm());
+}
+
+#[test]
+#[ignore = "e2e: requires Gemini at $GEMINI_API_KEY + $GEMINI_MODEL_ID; opt-in via `cargo test -- --ignored`"]
+fn llm_e2e_gemini_selection_reject_refine_or_escalate() {
+    selection_reject_refine_or_escalate(LlmEnv::gemini());
 }
 
 fn selection_reject_refine_or_escalate(target: LlmEnv) {
@@ -661,7 +743,7 @@ fn selection_reject_refine_or_escalate(target: LlmEnv) {
     write_artifact_tools(&dep);
     let original = "Reply to Derek Doe: confirm whether Project Falcon exists.";
     std::fs::write(dep.workspace_file("reply.md"), original).unwrap();
-    dep.write("steward.toml", &steward_openai_artifacts());
+    dep.write("steward.toml", &steward_artifacts_for_backend(steward_backend(&target)));
 
     let out = run_selection_env(
         &dep,
@@ -673,14 +755,12 @@ fn selection_reject_refine_or_escalate(target: LlmEnv) {
         "generative",
     );
     persist_output(&target, "selection_reject_refine_or_escalate", &out);
-    if !out.status.success() {
-        eprintln!(
-            "real reject/refine selection failed; stdout:\n{}\nstderr:\n{}",
-            String::from_utf8_lossy(&out.stdout),
-            String::from_utf8_lossy(&out.stderr)
-        );
-        return;
-    }
+    assert!(
+        out.status.success(),
+        "real reject/refine selection failed; stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
 
     let v = parse_stdout_json(&out);
     let receipts = v["receipts"].as_array().unwrap();
@@ -697,12 +777,19 @@ fn selection_reject_refine_or_escalate(target: LlmEnv) {
                 .to_lowercase()
                 .contains("project falcon exists")
     });
-    let escalated = receipts
-        .iter()
-        .any(|r| r["outcome"].as_str() == Some("Escalated"));
+    // Escalation only counts if it came via the governance loop — a
+    // Gate-driven budget exhaustion of refinement attempts. Actor
+    // cognitive failure (`<actor_failure>`) also produces Escalated
+    // Receipts but means the Steward never reached the Gate — it
+    // would falsely satisfy a "reject or escalate" assertion when
+    // the LLM is simply broken.
+    let governed_escalation = receipts.iter().any(|r| {
+        r["outcome"].as_str() == Some("Escalated")
+            && r["tool_call"]["tool"].as_str() == Some("<budget_exhausted>")
+    });
     assert!(
-        denied || allowed_safe_modify || escalated,
-        "expected denial, safe allowed modify, or escalation; trail:\n{}",
+        denied || allowed_safe_modify || governed_escalation,
+        "expected denial, safe allowed modify, or governed (budget-exhaustion) escalation; trail:\n{}",
         serde_json::to_string_pretty(receipts).unwrap()
     );
 }

@@ -31,7 +31,9 @@ at every level."
 
 - **Charter + Role context**: loaded from the Charter directory that
   `.chartered/charter.toml::path` points at, via
-  `core::charter_loader::load_charter_def` and `load_role_context_def`.
+  `runtime::charter_loader::load_charter_def` and `load_role_context_def`
+  (deployment-side filesystem IO; the kernel parses pre-loaded text
+  through `chartered_core::parse_charter_def` / `parse_role_context_def`).
 - **Per-role CognitionBackend**: per-role tables in `steward.toml`
   (`[actor]`, `[evaluator]`, `[tester]?`, `[judge]?`) declare
   `backend = "fake"` or `backend = "openai"`. For `fake`, inline
@@ -58,13 +60,13 @@ failure, 64 on usage error.
   `fake_responses` in the same TOML table. The only test path; CI
   runs entirely on this.
 - `backend = "openai"` — `OpenAiCompatibleBackend` (HTTP). Reads
-  `LLM_BASE_URL`, `LLM_MODEL`, `LLM_API_KEY` from environment
+  `OPEN_AI_BASE_URL`, `OPEN_AI_MODEL`, `OPEN_AI_API_KEY` from environment
   (loaded by `dotenvy::dotenv()` from `.env` in CWD or any ancestor
   on binary startup). Per-role `model = "..."` in `steward.toml`
-  overrides `LLM_MODEL`. Same impl serves both real OpenAI
-  (`LLM_BASE_URL=https://api.openai.com/v1`, key required) and local
+  overrides `OPEN_AI_MODEL`. Same impl serves both real OpenAI
+  (`OPEN_AI_BASE_URL=https://api.openai.com/v1`, key required) and local
   OpenAI-compatible servers (LM Studio, llama.cpp, vLLM, SGLang;
-  key optional). `LLM_BASE_URL` is the versioned API base; the backend
+  key optional). `OPEN_AI_BASE_URL` is the versioned API base; the backend
   appends `/chat/completions`. The `OpenAiCompatibleBackend` does not
   differ between them — only the env values do.
 
@@ -108,14 +110,18 @@ end up in the repo. `target/` (also gitignored) holds tempdirs from
 the test suite indirectly via `tempfile::TempDir`, which uses system
 temp by default.
 
-## E2E targets THIS binary
+## Binary-level integration targets THIS binary
 
-`tests/e2e.rs` constructs a complete `.chartered/` deployment in an
-isolated tempdir per test and runs the binary against it. Asserts on
-both the stdout JSON AND on real filesystem state in the workspace.
-The deployments are real production deployments — same loader, same
-loop, same `dispatch::*` Tools. The only distinction from a real-LLM
-deployment is `backend = "fake"` in the per-role config.
+`tests/binary_integration.rs` constructs a complete `.chartered/`
+deployment in an isolated tempdir per test and runs the binary against
+it. Asserts on both the stdout JSON AND on real filesystem state in the
+workspace. The deployments are real production deployments — same
+loader, same loop, same `dispatch::*` Tools. The only distinction from
+the e2e LLM deployments is `backend = "fake"` in the per-role config.
+
+Per `AGENTS.md §Verification`, this file is integration (vertical cut
+across the binary boundary, fake-LLM side of the test pair). E2e
+requires an actual LLM and lives in `tests/llm_e2e.rs`, local-only.
 
 Tempdirs are system temp (outside the repo, naturally gitignored).
 Each test gets its own tempdir for isolation.
@@ -137,15 +143,19 @@ subprocess.
 - `run` — the single execution path.
 
 Tests:
-- `tests/config.rs` exercises the loader directly.
-- `tests/e2e.rs` (18 tests) exercises the binary with `backend =
-  "fake"` deployments.
-- `tests/llm_e2e.rs` (2 tests) exercises the binary with `backend =
-  "openai"` deployments. Skips cleanly when `LLM_BASE_URL` is unset.
+- `tests/config.rs` — loader exercised directly (integration).
+- `tests/persistence.rs` — disk-backed Receipt store + Cognition log
+  (integration; one tempdir per test).
+- `tests/binary_integration.rs` — binary exercised with `backend =
+  "fake"` deployments (integration).
+- `tests/llm_e2e.rs` — binary exercised with real LLM (`backend =
+  "openai"` or `"openai"`-over-local-LM). E2e per
+  `AGENTS.md §Verification`: every test `#[ignore]`d, opt-in via
+  `cargo test -- --ignored`. Local-only.
 
-Module unit tests inside `persistence`, `openai_backend`. The binary
-entry (`src/main.rs`) consumes the lib the same way external
-consumers would.
+Module unit tests inside `openai_backend` (stateless canonicalization
+and URL building). The binary entry (`src/main.rs`) consumes the lib
+the same way external consumers would.
 
 ## Example deployment
 

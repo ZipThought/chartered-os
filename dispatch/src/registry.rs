@@ -13,24 +13,24 @@
 //! without rippling through constructor signatures.
 //!
 //! **Artifact-substrate executors** (`artifact_read`, `artifact_modify`,
-//! `artifact_list`, `record_finding`) share a single `ArtifactStore`
-//! constructed at `with_native_defaults` time, populated with the
-//! deployment's filesystem-backed Backends (`FilesystemTextBackend`
-//! for `kind=text`, `FilesystemFindingsBackend` for `kind=findings-store`).
-//! All four executors dispatch through that store, which routes by kind
-//! to the owning Backend. The Tool surface is fixed; substrate
-//! variation lives in Backends.
+//! `artifact_list`) share a single `ArtifactStore` constructed at
+//! `with_native_defaults` time, populated with the deployment's
+//! filesystem-backed Backends (`FilesystemTextBackend` for `kind=text`,
+//! `FilesystemRecordStore` for `kind=record-store`). All three
+//! executors dispatch through that store, which routes by kind to the
+//! owning Backend. The Tool surface is fixed at the spec's uniform
+//! verbs; substrate variation lives in Backends.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use chartered_core::{
-    ArtifactStore, ListArtifacts, ModifyArtifact, ReadArtifact, RecordFinding, ToolExecutor, ToolId,
+    ArtifactId, ArtifactStore, ListArtifacts, ModifyArtifact, ReadArtifact, ToolExecutor, ToolId,
 };
 
 use crate::paths::DeploymentPaths;
 use crate::{
-    FilesystemFindingsBackend, FilesystemTextBackend, NativeExec, NativeFsRead, NativeFsWrite,
+    FilesystemRecordStore, FilesystemTextBackend, NativeExec, NativeFsRead, NativeFsWrite,
 };
 
 #[derive(Debug, Clone)]
@@ -79,8 +79,12 @@ impl ExecutorRegistry {
     /// (`native_fs_read`, `native_fs_write`, `native_exec`, and the
     /// artifact-substrate executors backed by filesystem Backends).
     /// Takes ownership of the central `DeploymentPaths`.
-    pub fn new(paths: DeploymentPaths) -> Self {
-        Self::empty(paths).with_native_defaults()
+    ///
+    /// Async because `FilesystemRecordStore::new` opens its
+    /// JsonlSink at construction (spec §Persistence — one async
+    /// primitive serves every durable stream).
+    pub async fn new(paths: DeploymentPaths) -> std::io::Result<Self> {
+        Self::empty(paths).with_native_defaults().await
     }
 
     /// Construct a registry without the native built-ins. Tests that
@@ -98,19 +102,21 @@ impl ExecutorRegistry {
 
     /// Pre-populate the artifact substrate with the two reference
     /// filesystem Backends (`kind=text` against
-    /// `paths.workspace_root()`, `kind=findings-store` against
+    /// `paths.workspace_root()`, `kind=record-store` against
     /// `paths.chartered_dir()`) and register the corresponding executor
     /// builders.
-    pub fn with_native_defaults(mut self) -> Self {
+    pub async fn with_native_defaults(mut self) -> std::io::Result<Self> {
         let text_backend = Arc::new(FilesystemTextBackend::new(&self.paths));
-        let findings_backend = Arc::new(FilesystemFindingsBackend::new(&self.paths));
+        let records_backend = Arc::new(
+            FilesystemRecordStore::new(&self.paths, ArtifactId::new("records")).await?,
+        );
         // ArtifactStore registers Backends keyed by ArtifactKindId; one
         // Backend per kind is enforced at registration. Tool calls carry
         // `kind` as a first-class param and dispatch lands deterministically
         // — no fall-through, no ownership heuristic.
         let store = Arc::new(
             ArtifactStore::new()
-                .with_backend(findings_backend)
+                .with_backend(records_backend)
                 .with_backend(text_backend),
         );
         self.artifact_store = store;
@@ -146,11 +152,8 @@ impl ExecutorRegistry {
         self.register("native_artifact_list", |_paths, id, store| {
             Ok(Arc::new(ListArtifacts::new(id.clone(), store.clone())))
         });
-        self.register("native_artifact_record_finding", |_paths, id, store| {
-            Ok(Arc::new(RecordFinding::new(id.clone(), store.clone())))
-        });
 
-        self
+        Ok(self)
     }
 
     /// Register a builder for one executor name. Later registrations

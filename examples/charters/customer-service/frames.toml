@@ -1,5 +1,5 @@
 # Charter: customer-service
-# Spec §Reference Charters; loaded by core::charter_loader::load_charter_def.
+# Spec §Reference Charters; loaded by runtime::charter_loader::load_charter_def.
 #
 # All declared scopes here are RoleContext: the operator supplies the
 # pricing schedule, returns/warranty policy, and service scope as

@@ -1,18 +1,17 @@
 use std::sync::Arc;
 
 use chartered_core::{
-    ArtifactId, Finding, InMemoryArtifactStore, LegacyArtifact, ListArtifacts, LoopOutcome,
-    LoopRunner, ModifyArtifact, Outcome, ReadArtifact, Receipt, ReceiptStore, ReceiptStoreError,
-    RecordFinding, StewardId, ToolExecutor, ToolId, ToolParams, ToolRegistry, Workspace,
-    WorkspaceId,
+    ArtifactId, InMemoryArtifactStore, ListArtifacts, LoopOutcome, LoopRunner, ModifyArtifact,
+    Outcome, ReadArtifact, Receipt, ReceiptStore, ReceiptStoreError, Record, StewardId,
+    TextArtifactSeed, ToolExecutor, ToolId, ToolParams, ToolRegistry, Workspace, WorkspaceId,
 };
 
 mod common;
 use common::{make_frame, make_llm_actor, make_snapshot, make_steward};
 
 #[tokio::test]
-async fn artifact_tools_read_modify_list_and_record_findings() {
-    let store = Arc::new(InMemoryArtifactStore::new([LegacyArtifact {
+async fn artifact_tools_read_modify_list_and_records_via_modify_artifact() {
+    let store = Arc::new(InMemoryArtifactStore::new([TextArtifactSeed {
         id: ArtifactId::new("deal.md"),
         content: "vendor liability cap".into(),
     }]));
@@ -21,7 +20,6 @@ async fn artifact_tools_read_modify_list_and_record_findings() {
     let read = ReadArtifact::new(ToolId::new("read_artifact"), artifact_store.clone());
     let modify = ModifyArtifact::new(ToolId::new("modify_artifact"), artifact_store.clone());
     let list = ListArtifacts::new(ToolId::new("list_artifacts"), artifact_store.clone());
-    let record = RecordFinding::new(ToolId::new("record_finding"), artifact_store.clone());
 
     let selected = read
         .execute(&ToolParams(serde_json::json!({
@@ -58,34 +56,56 @@ async fn artifact_tools_read_modify_list_and_record_findings() {
         .map(|v| v["artifact_id"].as_str().unwrap())
         .collect();
     assert!(ids.contains(&"deal.md"), "list missing deal.md: {ids:?}");
-    assert!(ids.contains(&"findings"), "list missing findings: {ids:?}");
+    assert!(ids.contains(&"records"), "list missing records: {ids:?}");
 
-    record
+    // Records are appended by calling `modify_artifact` with
+    // `kind=record-store`. The runtime injects `_*` provenance keys
+    // (receipt_id, task_id, steward_id, snapshot_id) at the top of
+    // params; `ModifyArtifact::execute` propagates them into the Edit
+    // so the record Backend records provenance without a domain-
+    // specific Tool wrapper. Content fields under `edit.append` are
+    // opaque to the kernel — the Charter defines whatever shape suits
+    // the deployment.
+    modify
         .execute(&ToolParams(serde_json::json!({
-            "artifact_id": "deal.md",
-            "range": { "start": 0, "end": 6, "start_line": 1, "end_line": 1 },
-            "concern": "Confidentiality",
-            "severity": "high",
-            "detail": "Disclosure risk",
+            "kind": "record-store",
+            "artifact_id": "records",
+            "edit": {
+                "append": {
+                    "artifact_id": "deal.md",
+                    "range": { "start": 0, "end": 6, "start_line": 1, "end_line": 1 },
+                    "concern": "Confidentiality",
+                    "severity": "high",
+                    "detail": "Disclosure risk"
+                }
+            },
             "_task_id": "task-1",
             "_steward_id": "reviewer",
             "_snapshot_id": "snapshot-1",
             "_receipt_id": "receipt-1"
         })))
         .await
-        .expect("record finding");
+        .expect("modify_artifact append record");
 
-    let findings: Vec<Finding> = store.findings();
-    assert_eq!(findings.len(), 1);
-    assert_eq!(findings[0].artifact_id, ArtifactId::new("deal.md"));
-    assert_eq!(findings[0].author_steward_id, StewardId::new("reviewer"));
-    assert_eq!(findings[0].admitting_receipt_id.0, "receipt-1");
+    let records: Vec<Record> = store.records();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].steward_id, StewardId::new("reviewer"));
+    assert_eq!(records[0].receipt_id.0, "receipt-1");
+    assert_eq!(
+        records[0].content.get("artifact_id").and_then(|v| v.as_str()),
+        Some("deal.md")
+    );
+    assert_eq!(
+        records[0].content.get("severity").and_then(|v| v.as_str()),
+        Some("high")
+    );
 }
 
 struct FailingReceiptStore;
 
+#[async_trait::async_trait]
 impl ReceiptStore for FailingReceiptStore {
-    fn append(&self, _receipt: &Receipt) -> Result<(), ReceiptStoreError> {
+    async fn append(&self, _receipt: &Receipt) -> Result<(), ReceiptStoreError> {
         Err(ReceiptStoreError("forced append failure".into()))
     }
 
@@ -106,7 +126,7 @@ impl ReceiptStore for FailingReceiptStore {
 
 #[tokio::test]
 async fn artifact_modification_stops_when_receipt_append_fails() {
-    let artifact_store = Arc::new(InMemoryArtifactStore::new([LegacyArtifact {
+    let artifact_store = Arc::new(InMemoryArtifactStore::new([TextArtifactSeed {
         id: ArtifactId::new("architecture.md"),
         content: "public gateway uses shared cache".into(),
     }]));

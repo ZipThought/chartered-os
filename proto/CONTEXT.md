@@ -9,10 +9,10 @@ Versioned by field numbering. Inherits root `CONTEXT.md`.
 ## Layout
 
 - `v1/tool_call.proto` — the proposal packet.
-- `v1/verdict.proto` — per-Frame Ruling + within-chain trace,
-  `EvaluatorEntry`, `Metrics`.
-- `v1/receipt.proto` — append-only Gate-step record, `Outcome` and
-  `EnforcementLevel` enums.
+- `v1/verdict.proto` — `FrameRef` (Steward-scoped Frame identity),
+  `Verdict` (Ruling + reason + within-chain `EvaluatorEntry` trace).
+- `v1/receipt.proto` — append-only Gate-step record, `Outcome` enum,
+  `GovernanceMode` (grounding + evaluation toggles).
 - `v1/evaluate.proto` — Runtime ↔ Daemon ↔ Adapter messages.
 
 Future versions ship under `v2/`, `v3/`, etc. Renumbering or removing

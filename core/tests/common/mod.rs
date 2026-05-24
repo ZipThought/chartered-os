@@ -18,18 +18,31 @@ use async_trait::async_trait;
 use serde_json::json;
 
 use chartered_core::{
-    Charter, FakeCognitionBackend, Frame, FrameId, GovernanceMode, LlmActor, LlmEvaluator,
-    RoleContext, Snapshot, Steward, StewardId, ToolExecutor, ToolId, ToolParams, ToolRegistry,
-    ToolResult, Workspace, WorkspaceId,
+    ActionHint, Charter, Decision, DecisionLine, FakeCognitionBackend, Frame, FrameId,
+    GovernanceMode, LlmActor, LlmEvaluator, RoleContext, Snapshot, Steward, StewardId,
+    ToolExecutor, ToolId, ToolParams, ToolRegistry, ToolResult, Workspace, WorkspaceId,
 };
 
-/// Build a Frame backed by an `LlmEvaluator` and a `FakeCognitionBackend`
-/// pre-loaded with `responses`. The Frame has empty declared_scopes —
-/// kernel tests don't exercise scope plumbing through this helper.
+/// Build a Frame backed by an `LlmEvaluator` and a `FakeCognitionBackend`.
+/// Test inputs are line-shaped Evaluator responses like `"ALLOW: ok"` —
+/// this helper translates each into a `Vec<DecisionLine>` (mimicking
+/// what a real adapter does on the LLM output) and enqueues via the
+/// fake backend's strong-typed `enqueue_verdict_lines`. The kernel
+/// never parses these lines (see `AGENTS.md §Verification`); this
+/// helper is the test-fixture analogue of a production adapter.
+///
+/// Strings that contain no recognized decision keyword are enqueued as
+/// pure content (no `verdict_lines`) — used by tests that want to
+/// exercise the Gate's empty-trace fallback (UNGROUNDED).
 pub fn make_frame(id: &str, applies: &[&str], responses: &[&str]) -> Frame {
     let backend = Arc::new(FakeCognitionBackend::new(format!("eval-{id}")));
     for r in responses {
-        backend.enqueue(r.to_string());
+        let lines = verdict_lines_from_test_string(r);
+        if lines.is_empty() {
+            backend.enqueue(r.to_string());
+        } else {
+            backend.enqueue_verdict_lines(lines);
+        }
     }
     let evaluator = Arc::new(LlmEvaluator::new(
         format!("llm-eval-{id}"),
@@ -47,16 +60,63 @@ pub fn make_frame(id: &str, applies: &[&str], responses: &[&str]) -> Frame {
     }
 }
 
-/// Build an `LlmActor` whose backend dequeues `responses` (each
-/// JSON-serialized) on each `step()`. The Actor's system prompt and
-/// context_id are uniform across kernel tests because they don't shape
-/// the assertions — backend behavior is what's under test.
+/// Parse Evaluator-shaped test fixture strings into `DecisionLine`s.
+/// One line per line of input that starts with a recognized keyword.
+/// Lines without a recognized keyword produce no DecisionLine (the
+/// caller can decide whether to fall back to plain content).
+fn verdict_lines_from_test_string(text: &str) -> Vec<DecisionLine> {
+    text.lines()
+        .filter_map(|line| {
+            let (head, tail) = line.split_once(':')?;
+            let decision = match head.trim().to_uppercase().as_str() {
+                "ALLOW" => Decision::Allow,
+                "DENY" => Decision::Deny,
+                "ESCALATE" => Decision::Escalate,
+                "DEFER" => Decision::Defer,
+                _ => return None,
+            };
+            Some(DecisionLine {
+                decision,
+                observation: tail.trim().to_string(),
+            })
+        })
+        .collect()
+}
+
+/// Build an `LlmActor` whose backend dequeues one Action per `step()`.
+/// Test inputs are `serde_json::Value` shaped as the canonical Action
+/// envelope (`{"tool":"...","params":{...}}` or `{"halt":true}`) — this
+/// helper translates each into an `ActionHint` and enqueues it via the
+/// fake backend's strong-typed surface. The kernel never parses JSON
+/// (spec §Cognition Layer: kernel consumes the strong-typed
+/// `action_hint`); this helper is the test-fixture analogue of what
+/// real adapters do in production.
 pub fn make_llm_actor(id: &str, responses: Vec<serde_json::Value>) -> LlmActor {
     let backend = Arc::new(FakeCognitionBackend::new(format!("actor-{id}")));
     for r in responses {
-        backend.enqueue(serde_json::to_string(&r).unwrap());
+        let action = action_hint_from_value(&r).unwrap_or_else(|| {
+            panic!(
+                "make_llm_actor: response value is not a canonical Action envelope: {r}"
+            )
+        });
+        backend.enqueue_action(action);
     }
     LlmActor::new(id, backend, "test actor", "ctx-test")
+}
+
+fn action_hint_from_value(v: &serde_json::Value) -> Option<ActionHint> {
+    if v.get("halt").and_then(serde_json::Value::as_bool) == Some(true) {
+        return Some(ActionHint::Halt);
+    }
+    let tool = v.get("tool").and_then(serde_json::Value::as_str)?;
+    let params = v
+        .get("params")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+    Some(ActionHint::Propose {
+        tool: tool.to_string(),
+        params,
+    })
 }
 
 /// Build a Snapshot from frames + permitted tool ids.
@@ -69,7 +129,7 @@ pub fn make_snapshot(frames: Vec<Frame>, permitted: &[&str]) -> Arc<Snapshot> {
         charter_content_hash: "test-charter".into(),
         behavioral_spec: String::new(),
     };
-    Snapshot::new(charter, RoleContext::empty())
+    Snapshot::new(charter, RoleContext::empty(), Vec::new())
 }
 
 /// Build a Steward with the given id, snapshot, and registry. Wraps the

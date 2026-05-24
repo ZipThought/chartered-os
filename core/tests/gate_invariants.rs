@@ -306,7 +306,7 @@ async fn evaluator_timeout_flips_intercept_complete() {
         charter_content_hash: "slow".into(),
         behavioral_spec: String::new(),
     };
-    let snap = Snapshot::new(charter, RoleContext::empty());
+    let snap = Snapshot::new(charter, RoleContext::empty(), Vec::new());
 
     let gate = Gate::new(snap, StewardId::new("test-steward"), GovernanceMode::FULL).with_frame_timeout(Duration::from_millis(50));
     let r = gate.evaluate(proposal("t")).await;
@@ -339,7 +339,7 @@ async fn backend_error_yields_ungrounded() {
         charter_content_hash: "x".into(),
         behavioral_spec: String::new(),
     };
-    let snap = Snapshot::new(charter, RoleContext::empty());
+    let snap = Snapshot::new(charter, RoleContext::empty(), Vec::new());
     let gate = Gate::new(snap, StewardId::new("test-steward"), GovernanceMode::FULL);
     let r = gate.evaluate(proposal("t")).await;
     assert_eq!(r.outcome, Outcome::Denied);
@@ -355,19 +355,31 @@ async fn backend_error_yields_ungrounded() {
     );
 }
 
-/// Actor cognitive failure (parse error) surfaces as a Receipt with
-/// `outcome: Escalated` and `intercept_complete=false`. CHECKLIST §Risk
-/// Register > Silent Failure: every partial-coverage condition must be
-/// visible in the Receipt trail; silent halt would leave operators
-/// unable to distinguish "task complete" from "Actor failed."
+/// Actor persistent cognitive failure (every inner step produces
+/// unparseable output → inner-loop budget exhausts) surfaces as a
+/// Receipt with `outcome: Escalated` and `intercept_complete=false`.
+/// CHECKLIST §Risk Register > Silent Failure: every partial-coverage
+/// condition must be visible in the Receipt trail; silent halt would
+/// leave operators unable to distinguish "task complete" from "Actor
+/// failed."
+///
+/// Under the agentic inner loop (spec §Cognition Layer), a single
+/// non-structured response is treated as a reasoning step and the loop
+/// continues — only sustained inability to emit a structured action
+/// escalates. The test exhausts the inner budget by enqueueing budget+
+/// non-JSON responses.
 #[tokio::test]
-async fn actor_malformed_response_escalates_with_intercept_incomplete() {
+async fn actor_persistent_malformed_responses_escalate_via_budget_exhaustion() {
+    use chartered_core::DEFAULT_INNER_STEP_BUDGET;
     let snap = snapshot(vec![frame("f", &["t"], &[])], &["t"]);
     let ws = workspace(snap, registry_with_nops(&["t"]));
-    let steward = sole_steward(&ws); let runner = LoopRunner::new(ws.clone(), steward);
+    let steward = sole_steward(&ws);
+    let runner = LoopRunner::new(ws.clone(), steward);
 
     let backend = Arc::new(FakeCognitionBackend::new("malformed-actor"));
-    backend.enqueue("not valid JSON");
+    for _ in 0..DEFAULT_INNER_STEP_BUDGET {
+        backend.enqueue("not valid JSON");
+    }
     let mut actor = LlmActor::new("malformed", backend, "system prompt", "ctx-1");
 
     let result = runner.run(&mut actor).await;
@@ -380,7 +392,49 @@ async fn actor_malformed_response_escalates_with_intercept_incomplete() {
     assert!(!r.intercept_complete);
     assert_eq!(r.tool_call.tool.0, "<actor_failure>");
     assert!(r.verdicts.is_empty());
+    let reason = r.tool_call.params.0["reason"].as_str().unwrap();
+    assert!(
+        reason.contains("inner step budget exhausted"),
+        "expected budget exhaustion in reason, got: {reason}"
+    );
     assert_eq!(ws.receipt_store.all().len(), 1);
+}
+
+/// Inner-loop reasoning + commit: the Actor emits free-form reasoning
+/// for several inner steps, then commits to a tool call. The outer
+/// LoopRunner sees one Allowed Receipt (one externally-observable
+/// effect) regardless of how many inner reasoning steps preceded it.
+/// Spec §Cognition Layer: the inner loop is bounded planning, not
+/// bounded effect.
+#[tokio::test]
+async fn actor_inner_loop_reasoning_then_tool_call_yields_one_allowed_receipt() {
+    let snap = snapshot(vec![frame("f", &["t"], &["ALLOW: ok"])], &["t"]);
+    let ws = workspace(snap, registry_with_nops(&["t"]));
+    let steward = sole_steward(&ws);
+    let runner = LoopRunner::new(ws.clone(), steward);
+
+    let backend = Arc::new(FakeCognitionBackend::new("reasoning-actor"));
+    backend
+        .enqueue("Step 1: read the request.")
+        .enqueue("Step 2: plan to call tool t.")
+        .enqueue_action(chartered_core::ActionHint::Propose {
+            tool: "t".into(),
+            params: serde_json::json!({}),
+        })
+        .enqueue_action(chartered_core::ActionHint::Halt);
+    let mut actor = LlmActor::new("reasoner", backend, "system prompt", "ctx-1");
+
+    let result = runner.run(&mut actor).await;
+    let LoopOutcome::Halted { trail, .. } = result else {
+        panic!("expected Halted, got {result:?}");
+    };
+    // Three Receipts: the Allowed tool call, then the kernel-emitted
+    // <halt> Receipt. Two reasoning steps did NOT produce Receipts —
+    // only externally-observable effects do.
+    assert_eq!(trail.len(), 2, "one Allowed + one <halt> Receipt");
+    assert_eq!(trail[0].outcome, Outcome::Allowed);
+    assert_eq!(trail[0].tool_call.tool.0, "t");
+    assert_eq!(trail[1].tool_call.tool.0, "<halt>");
 }
 
 /// Actor backend error surfaces as the same kind of Receipt.
@@ -447,7 +501,7 @@ async fn workspace_rejects_missing_charter_scope() {
         charter_content_hash: "x".into(),
         behavioral_spec: String::new(),
     };
-    let snap = Snapshot::new(charter, RoleContext::empty());
+    let snap = Snapshot::new(charter, RoleContext::empty(), Vec::new());
     let mut reg = ToolRegistry::new();
     reg.register(Arc::new(NopTool::new("t")));
     let steward = make_steward("sut", snap, reg);
@@ -485,7 +539,7 @@ async fn workspace_rejects_missing_role_context_scope() {
         charter_content_hash: "x".into(),
         behavioral_spec: String::new(),
     };
-    let snap = Snapshot::new(charter, RoleContext::empty());
+    let snap = Snapshot::new(charter, RoleContext::empty(), Vec::new());
     let mut reg = ToolRegistry::new();
     reg.register(Arc::new(NopTool::new("t")));
     let steward = make_steward("sut", snap, reg);
@@ -535,7 +589,7 @@ async fn scopes_reach_evaluator_with_provenance_separated() {
     let mut role_context = RoleContext::empty();
     role_context.scopes = vec![("schedule".into(), "FACTS_FROM_PROFESSIONAL".into())];
     role_context.role_context_content_hash = "rc-x".into();
-    let snap = Snapshot::new(charter, role_context);
+    let snap = Snapshot::new(charter, role_context, Vec::new());
     let mut reg = ToolRegistry::new();
     reg.register(Arc::new(NopTool::new("t")));
 

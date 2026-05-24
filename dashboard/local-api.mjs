@@ -72,159 +72,14 @@ async function workspaceState() {
 }
 
 async function charterState() {
-  const charterRefRaw = await readOptional(path.join(charteredDir, "charter.toml"));
-  const charterRef = parseCharterRef(charterRefRaw);
-  const charterDir = path.resolve(charteredDir, charterRef.path ?? "./charter");
-  const framesToml = await readOptional(path.join(charterDir, "frames.toml"));
-  const scopesMd = await readOptional(path.join(charterDir, "scopes.md"));
-  const behavioralSpec = await readOptional(path.join(charterDir, "behavioral_spec.md"));
-  const roleContextMd = await readOptional(path.join(charteredDir, "role_context.md"));
-  const charteredToml = await readOptional(path.join(charteredDir, "chartered.toml"));
-
-  const frames = parseFrames(framesToml);
-  const scopes = parseHeadingSections(scopesMd, 2);
-  const sections = splitTopLevelSections(behavioralSpec);
-  const actionsBlock = sections.find((s) => /actions?/i.test(s.title))?.body ?? "";
-  const reviewersBlock = sections.find((s) => /reviewers?/i.test(s.title))?.body ?? "";
-  const behavioralBlock =
-    sections.find((s) => /behavioral spec/i.test(s.title))?.body ?? behavioralSpec;
-  const actions = parseActions(actionsBlock);
-  const reviewers = parseReviewers(reviewersBlock);
-  const governance = parseGovernanceMode(charteredToml);
-  const stewardId = "sut";
-  const stewards = [
-    {
-      id: stewardId,
-      role: "reviewer",
-      display_name: "Project Citadel Steward",
-      frames,
-      authoring_notes: reviewers,
-    },
-  ];
-
-  return {
-    charter_ref: charterRef,
-    charter_dir: charterDir,
-    behavioral_spec: behavioralBlock.trim(),
-    scopes,
-    frames,
-    stewards,
-    actions,
-    reviewers,
-    role_context_present: roleContextMd.length > 0,
-    governance_mode: governance,
-  };
-}
-
-function parseCharterRef(text) {
-  const path = (text.match(/path\s*=\s*"([^"]*)"/) ?? [])[1];
-  const versionRaw = (text.match(/version\s*=\s*(\d+)/) ?? [])[1];
-  return {
-    path: path ?? null,
-    version: versionRaw ? Number(versionRaw) : 1,
-  };
-}
-
-function parseFrames(toml) {
-  const frames = [];
-  if (!toml) return frames;
-  const blocks = toml.split(/^\s*\[\[frames\]\]\s*$/m).slice(1);
-  for (const block of blocks) {
-    const id = (block.match(/^\s*id\s*=\s*"([^"]+)"/m) ?? [])[1] ?? "";
-    const concern = (block.match(/^\s*concern\s*=\s*"([\s\S]*?)"\s*$/m) ?? [])[1] ?? "";
-    const appliesRaw = (block.match(/^\s*applies_to_tools\s*=\s*\[([\s\S]*?)\]/m) ?? [])[1] ?? "";
-    const applies = appliesRaw
-      .split(",")
-      .map((s) => (s.match(/"([^"]+)"/) ?? [])[1])
-      .filter(Boolean);
-    const declared = [];
-    const declaredBlock = (block.match(/declared_scopes\s*=\s*\[([\s\S]*?)\]/m) ?? [])[1] ?? "";
-    for (const m of declaredBlock.matchAll(/\{[^}]*name\s*=\s*"([^"]+)"[^}]*kind\s*=\s*"([^"]+)"[^}]*\}/g)) {
-      declared.push({ name: m[1], kind: m[2] });
-    }
-    frames.push({ id, concern, applies_to_tools: applies, declared_scopes: declared });
+  const { command, args } = runtimeCommand(["--print-charter"]);
+  const result = await spawnCapture(command, args);
+  if (result.code !== 0) {
+    throw new Error(
+      `chartered-runtime --print-charter exited ${result.code}: ${result.stderr || result.stdout}`,
+    );
   }
-  return frames;
-}
-
-function parseHeadingSections(text, level) {
-  const out = [];
-  if (!text) return out;
-  const re = new RegExp(`^#{${level}}\\s+(.+)$`, "gm");
-  const indices = [];
-  let m;
-  while ((m = re.exec(text))) {
-    indices.push({ index: m.index, end: m.index + m[0].length, title: m[1].trim() });
-  }
-  for (let i = 0; i < indices.length; i++) {
-    const start = indices[i].end;
-    const stop = i + 1 < indices.length ? indices[i + 1].index : text.length;
-    out.push({ name: indices[i].title, text: text.slice(start, stop).trim() });
-  }
-  return out;
-}
-
-function splitTopLevelSections(text) {
-  const out = [];
-  if (!text) return out;
-  const re = /^#\s+(.+)$/gm;
-  const heads = [];
-  let m;
-  while ((m = re.exec(text))) heads.push({ index: m.index, end: m.index + m[0].length, title: m[1].trim() });
-  if (!heads.length) return [{ title: "", body: text }];
-  for (let i = 0; i < heads.length; i++) {
-    const start = heads[i].end;
-    const stop = i + 1 < heads.length ? heads[i + 1].index : text.length;
-    out.push({ title: heads[i].title, body: text.slice(start, stop).trim() });
-  }
-  return out;
-}
-
-function parseActions(block) {
-  const subs = parseHeadingSections(block, 2);
-  return subs.map((sub) => {
-    let kind = "generative";
-    let prompt = "";
-    let inPrompt = false;
-    for (const line of sub.text.split("\n")) {
-      if (/^\s*Type:\s*/i.test(line)) {
-        kind = line.replace(/^\s*Type:\s*/i, "").trim().toLowerCase();
-        inPrompt = false;
-      } else if (/^\s*Prompt:\s*/i.test(line)) {
-        prompt = line.replace(/^\s*Prompt:\s*/i, "").trim();
-        inPrompt = true;
-      } else if (inPrompt) {
-        prompt += "\n" + line;
-      }
-    }
-    return { name: sub.name, kind, prompt: prompt.trim() };
-  });
-}
-
-function parseReviewers(block) {
-  const subs = parseHeadingSections(block, 2);
-  return subs.map((sub) => {
-    let concern = "";
-    let scopes = [];
-    for (const line of sub.text.split("\n")) {
-      if (/^\s*Concern:\s*/i.test(line)) concern = line.replace(/^\s*Concern:\s*/i, "").trim();
-      else if (/^\s*Scopes:\s*/i.test(line)) {
-        scopes = line
-          .replace(/^\s*Scopes:\s*/i, "")
-          .trim()
-          .split(",")
-          .map((s) => s.trim())
-          .filter(Boolean);
-      }
-    }
-    return { name: sub.name, concern, scopes };
-  });
-}
-
-function parseGovernanceMode(charteredToml) {
-  const grounding = /grounding\s*=\s*true/i.test(charteredToml);
-  const evaluation = /evaluation\s*=\s*true/i.test(charteredToml);
-  return { grounding, evaluation };
+  return JSON.parse(result.stdout);
 }
 
 async function listArtifacts(root) {
@@ -261,7 +116,12 @@ function isArtifactPath(file) {
 }
 
 async function readFindings() {
-  const file = path.join(charteredDir, "findings.jsonl");
+  // The kernel persists `kind=record-store` records to
+  // `<chartered_dir>/<artifact_id>.jsonl`. The default record store
+  // registers artifact_id `records`; the dashboard's "Findings" left-
+  // rail node renders those records (which, in the demo, happen to
+  // carry concern/severity/detail fields).
+  const file = path.join(charteredDir, "records.jsonl");
   const text = await readOptional(file);
   return text
     .split("\n")

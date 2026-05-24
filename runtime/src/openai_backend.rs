@@ -1,37 +1,41 @@
 //! OpenAI-compatible HTTP CognitionBackend.
 //!
 //! ONE backend implementation serves both:
-//!   - Real OpenAI (`LLM_BASE_URL=https://api.openai.com/v1`,
-//!     `LLM_API_KEY=sk-...`)
+//!   - Real OpenAI (`OPEN_AI_BASE_URL=https://api.openai.com/v1`,
+//!     `OPEN_AI_API_KEY=sk-...`)
 //!   - Local OpenAI-compatible servers, e.g. LM Studio, llama.cpp,
-//!     vLLM, SGLang (`LLM_BASE_URL=http://localhost:1234/v1`, key
+//!     vLLM, SGLang (`OPEN_AI_BASE_URL=http://localhost:1234/v1`, key
 //!     optional)
 //!
 //! The wire format is the OpenAI Chat Completions API
-//! (POST `<base>/chat/completions`). When `LLM_API_KEY` is set
+//! (POST `<base>/chat/completions`). When `OPEN_AI_API_KEY` is set
 //! and non-empty, the request carries `Authorization: Bearer ...`;
 //! otherwise no auth header (local servers usually don't need one).
 //!
 //! Configuration order: env via `dotenvy` (`.env` in CWD or any
 //! ancestor) → process env. Per-role `steward.toml` `model` overrides
-//! the env's `LLM_MODEL`. The base URL and the API key are always
+//! the env's `OPEN_AI_MODEL`. The base URL and the API key are always
 //! taken from env — secrets and host endpoints don't belong in TOML
 //! that may be committed.
 //!
-//! Vendor wire-format adaptation lives here. Roles consume the
-//! canonical `CognitionResponse { text, tool_call_hint }`; the kernel
-//! never sees gpt-oss harmony envelopes, markdown code fences around
-//! JSON, or `to=tool.<name>` recipient prefixes. `canonicalize_assistant_response`
-//! strips those before returning.
+//! Vendor wire-format adaptation lives here. The Actor consumes
+//! `CognitionResponse { content, action_hint }`; the kernel never sees
+//! gpt-oss harmony envelopes, markdown code fences, or `to=tool.<name>`
+//! recipient prefixes. Harmony-envelope unwrapping is local to this
+//! file (gpt-oss-specific); markdown-fence stripping and JSON-from-prose
+//! extraction live in `crate::canonicalize` because every adapter needs
+//! them.
 
 use std::env;
 use std::time::Duration;
 
 use async_trait::async_trait;
 use chartered_core::{
-    CognitionBackend, CognitionError, CognitionRequest, CognitionResponse, Message, ToolCallHint,
+    ActionHint, CognitionBackend, CognitionError, CognitionRequest, CognitionResponse, Message,
 };
 use serde::{Deserialize, Serialize};
+
+use crate::canonicalize;
 
 #[derive(Debug, Clone)]
 pub enum BackendBuildError {
@@ -59,7 +63,7 @@ const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
 /// invocation, and each role (Actor, Evaluator-per-Frame, Tester,
 /// Judge) gets a backend through it. Sharing the client means one
 /// connection pool, one TLS session cache, one keep-alive set across
-/// every role hitting the same `LLM_BASE_URL`.
+/// every role hitting the same `OPEN_AI_BASE_URL`.
 pub struct OpenAiBackendFactory {
     base_url: String,
     default_model: Option<String>,
@@ -68,15 +72,15 @@ pub struct OpenAiBackendFactory {
 }
 
 impl OpenAiBackendFactory {
-    /// Read `LLM_BASE_URL`, `LLM_MODEL`, `LLM_API_KEY` from env once.
-    /// `LLM_BASE_URL` is mandatory; `LLM_MODEL` provides the default
-    /// model for backends whose per-role `model` is unset; `LLM_API_KEY`
+    /// Read `OPEN_AI_BASE_URL`, `OPEN_AI_MODEL`, `OPEN_AI_API_KEY` from env once.
+    /// `OPEN_AI_BASE_URL` is mandatory; `OPEN_AI_MODEL` provides the default
+    /// model for backends whose per-role `model` is unset; `OPEN_AI_API_KEY`
     /// is optional.
     pub fn from_env() -> Result<Self, BackendBuildError> {
         let base_url =
-            env::var("LLM_BASE_URL").map_err(|_| BackendBuildError::MissingEnv("LLM_BASE_URL"))?;
-        let default_model = env::var("LLM_MODEL").ok();
-        let api_key = env::var("LLM_API_KEY").ok().filter(|s| !s.is_empty());
+            env::var("OPEN_AI_BASE_URL").map_err(|_| BackendBuildError::MissingEnv("OPEN_AI_BASE_URL"))?;
+        let default_model = env::var("OPEN_AI_MODEL").ok();
+        let api_key = env::var("OPEN_AI_API_KEY").ok().filter(|s| !s.is_empty());
         let client = reqwest::Client::builder()
             .timeout(DEFAULT_REQUEST_TIMEOUT)
             .build()
@@ -90,7 +94,7 @@ impl OpenAiBackendFactory {
     }
 
     /// Build a backend for one role. `model_override` is the per-role
-    /// `model` from `steward.toml`; falls back to `LLM_MODEL` env when
+    /// `model` from `steward.toml`; falls back to `OPEN_AI_MODEL` env when
     /// unset.
     pub fn build(
         &self,
@@ -100,7 +104,7 @@ impl OpenAiBackendFactory {
         let model = model_override
             .or_else(|| self.default_model.clone())
             .ok_or(BackendBuildError::MissingEnv(
-                "LLM_MODEL (set env or steward.toml [<role>] model)",
+                "OPEN_AI_MODEL (set env or steward.toml [<role>] model)",
             ))?;
         Ok(OpenAiCompatibleBackend {
             id: id.into(),
@@ -170,20 +174,24 @@ impl CognitionBackend for OpenAiCompatibleBackend {
             .await
             .map_err(|e| CognitionError(format!("decoding JSON from {url}: {e}")))?;
 
-        let raw_text = parsed
+        let raw_content = parsed
             .choices
             .first()
             .map(|c| c.message.content.clone())
             .unwrap_or_default();
-        let canonical = canonicalize_assistant_response(&raw_text);
+        let (content, action_hint) = canonicalize_openai_content(&raw_content);
+        let verdict_lines = canonicalize::canonicalize_verdict_lines(&content);
+        let judge_output = canonicalize::canonicalize_judge_output(&content);
         let usage = parsed.usage.unwrap_or_default();
 
         Ok(CognitionResponse {
-            text: canonical.text,
+            content,
             input_tokens: usage.prompt_tokens,
             output_tokens: usage.completion_tokens,
             cache_hit_tokens: usage.cached_tokens,
-            tool_call_hint: canonical.tool_call_hint,
+            action_hint,
+            verdict_lines,
+            judge_output,
         })
     }
 }
@@ -247,47 +255,50 @@ struct Usage {
 // name from its params (harmony `to=` header + JSON body).
 // ---------------------------------------------------------------------
 
-struct CanonicalAssistantResponse {
-    text: String,
-    tool_call_hint: Option<ToolCallHint>,
-}
-
-fn canonicalize_assistant_response(raw: &str) -> CanonicalAssistantResponse {
+/// Convert an OpenAI-compatible assistant message into the kernel's
+/// `(content, action_hint)` pair. Three vendor shapes handled:
+///   - Plain text (or markdown-fenced JSON / prose-around-JSON):
+///     delegate to `canonicalize::canonicalize_action_hint`.
+///   - gpt-oss harmony envelope without `to=` recipient: same as plain
+///     text, after stripping the envelope.
+///   - gpt-oss harmony envelope WITH `to=` recipient: the recipient
+///     names the tool; the body is the params JSON. Produce
+///     `ActionHint::Propose` directly, bypassing the body's lack of
+///     `"tool"` field. (gpt-oss specific.)
+fn canonicalize_openai_content(raw: &str) -> (String, Option<ActionHint>) {
     if let Some(harmony) = parse_harmony_assistant_block(raw) {
-        let body = strip_code_fences(harmony.body);
-        let json_text = extract_json_object(body).unwrap_or(body);
+        let body = canonicalize::strip_code_fences(harmony.body);
+        let json_text = canonicalize::extract_first_json_object(body).unwrap_or(body);
         if let Ok(value) = serde_json::from_str::<serde_json::Value>(json_text) {
+            // Recipient-named tool: the tool name lives in the header,
+            // the body is the params. Build Propose from both.
             if let Some(recipient) = harmony.recipient
                 && value.get("tool").is_none()
                 && value.get("halt").is_none()
             {
                 let tool_name = strip_harmony_recipient_namespace(recipient).to_string();
                 if !tool_name.is_empty() {
-                    return CanonicalAssistantResponse {
-                        text: json_text.to_string(),
-                        tool_call_hint: Some(ToolCallHint {
+                    return (
+                        json_text.to_string(),
+                        Some(ActionHint::Propose {
                             tool: tool_name,
                             params: value,
                         }),
-                    };
+                    );
                 }
             }
-            return CanonicalAssistantResponse {
-                text: json_text.to_string(),
-                tool_call_hint: None,
-            };
+            // Body carries the full Action envelope.
+            let hint = canonicalize::parse_action_value(&value);
+            return (json_text.to_string(), hint);
         }
-        return CanonicalAssistantResponse {
-            text: body.to_string(),
-            tool_call_hint: None,
-        };
+        // Harmony body wasn't JSON — pure reasoning.
+        return (body.to_string(), None);
     }
-    let cleaned = strip_code_fences(raw);
-    let extracted = extract_json_object(cleaned).unwrap_or(cleaned);
-    CanonicalAssistantResponse {
-        text: extracted.to_string(),
-        tool_call_hint: None,
-    }
+    // No harmony envelope — fall through to the shared util.
+    let stripped = canonicalize::strip_code_fences(raw);
+    let extracted = canonicalize::extract_first_json_object(stripped).unwrap_or(stripped);
+    let hint = canonicalize::canonicalize_action_hint(raw);
+    (extracted.to_string(), hint)
 }
 
 /// gpt-oss harmony assistant block parts.
@@ -321,62 +332,6 @@ fn strip_harmony_recipient_namespace(s: &str) -> &str {
         .trim_start_matches("tools.")
 }
 
-fn strip_code_fences(s: &str) -> &str {
-    let s = s.trim();
-    let s = s
-        .strip_prefix("```json")
-        .or_else(|| s.strip_prefix("```JSON"))
-        .or_else(|| s.strip_prefix("```"))
-        .map(str::trim)
-        .unwrap_or(s);
-    s.trim_end_matches("```").trim()
-}
-
-/// Walk `text` and return the first balanced top-level JSON object
-/// substring. String/escape state is tracked so braces inside JSON
-/// strings do not confuse depth tracking. Returns None when no
-/// balanced object is present.
-fn extract_json_object(text: &str) -> Option<&str> {
-    let bytes = text.as_bytes();
-    let mut depth: i32 = 0;
-    let mut start: Option<usize> = None;
-    let mut in_string = false;
-    let mut escape = false;
-    for (i, &b) in bytes.iter().enumerate() {
-        if in_string {
-            if escape {
-                escape = false;
-                continue;
-            }
-            match b {
-                b'\\' => escape = true,
-                b'"' => in_string = false,
-                _ => {}
-            }
-            continue;
-        }
-        match b {
-            b'{' => {
-                if depth == 0 {
-                    start = Some(i);
-                }
-                depth += 1;
-            }
-            b'"' => in_string = true,
-            b'}' => {
-                depth -= 1;
-                if depth == 0
-                    && let Some(s) = start
-                {
-                    return Some(&text[s..=i]);
-                }
-            }
-            _ => {}
-        }
-    }
-    None
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -385,13 +340,13 @@ mod tests {
     fn factory_from_env_requires_base_url() {
         // Use unsafe block since set/remove env are unsafe in newer Rust.
         unsafe {
-            env::remove_var("LLM_BASE_URL");
+            env::remove_var("OPEN_AI_BASE_URL");
         }
         let err = match OpenAiBackendFactory::from_env() {
             Ok(_) => panic!("expected MissingEnv error"),
             Err(e) => e,
         };
-        assert!(matches!(err, BackendBuildError::MissingEnv("LLM_BASE_URL")));
+        assert!(matches!(err, BackendBuildError::MissingEnv("OPEN_AI_BASE_URL")));
     }
 
     #[test]
@@ -407,63 +362,66 @@ mod tests {
     }
 
     #[test]
-    fn canonicalize_plain_text_passes_through() {
-        let c = canonicalize_assistant_response("ALLOW: ok\nDENY: no");
-        assert_eq!(c.text, "ALLOW: ok\nDENY: no");
-        assert!(c.tool_call_hint.is_none());
+    fn canonicalize_plain_text_yields_no_action_hint() {
+        let (content, hint) = canonicalize_openai_content("ALLOW: ok\nDENY: no");
+        assert_eq!(content, "ALLOW: ok\nDENY: no");
+        assert!(hint.is_none());
     }
 
     #[test]
-    fn canonicalize_markdown_fenced_json_strips_fences() {
-        let c = canonicalize_assistant_response(
-            "```json\n{\"tool\":\"write_file\",\"params\":{}}\n```",
-        );
-        assert_eq!(c.text, r#"{"tool":"write_file","params":{}}"#);
-        assert!(c.tool_call_hint.is_none());
+    fn canonicalize_markdown_fenced_action_yields_propose() {
+        let (_content, hint) =
+            canonicalize_openai_content("```json\n{\"tool\":\"write_file\",\"params\":{}}\n```");
+        match hint {
+            Some(ActionHint::Propose { tool, .. }) => assert_eq!(tool, "write_file"),
+            other => panic!("expected Propose, got {other:?}"),
+        }
     }
 
     #[test]
-    fn canonicalize_harmony_envelope_with_full_action_returns_text_no_hint() {
+    fn canonicalize_harmony_envelope_with_full_action_yields_propose() {
         let raw = "<|channel|>commentary <|message|>{\"tool\":\"write_file\",\"params\":{\"path\":\"x\"}}<|return|>";
-        let c = canonicalize_assistant_response(raw);
-        assert_eq!(c.text, r#"{"tool":"write_file","params":{"path":"x"}}"#);
-        assert!(c.tool_call_hint.is_none());
+        let (_content, hint) = canonicalize_openai_content(raw);
+        match hint {
+            Some(ActionHint::Propose { tool, params }) => {
+                assert_eq!(tool, "write_file");
+                assert_eq!(params["path"].as_str(), Some("x"));
+            }
+            other => panic!("expected Propose, got {other:?}"),
+        }
     }
 
     #[test]
-    fn canonicalize_harmony_with_tool_recipient_extracts_hint() {
+    fn canonicalize_harmony_with_tool_recipient_extracts_propose() {
         // gpt-oss harmony: tool name in the header (`to=...`),
-        // params in the JSON body. Adapter populates the hint.
+        // params in the JSON body. The recipient names the tool.
         let raw = "<|channel|>commentary to=tool.write_file <|constrain|>json<|message|>{\"path\":\"hello.txt\",\"content\":\"hi\"}";
-        let c = canonicalize_assistant_response(raw);
-        let hint = c.tool_call_hint.expect("expected hint");
-        assert_eq!(hint.tool, "write_file");
-        assert_eq!(hint.params["path"].as_str(), Some("hello.txt"));
-        assert_eq!(hint.params["content"].as_str(), Some("hi"));
+        let (_content, hint) = canonicalize_openai_content(raw);
+        match hint {
+            Some(ActionHint::Propose { tool, params }) => {
+                assert_eq!(tool, "write_file");
+                assert_eq!(params["path"].as_str(), Some("hello.txt"));
+                assert_eq!(params["content"].as_str(), Some("hi"));
+            }
+            other => panic!("expected Propose, got {other:?}"),
+        }
     }
 
     #[test]
     fn canonicalize_harmony_with_functions_recipient() {
         let raw = "<|start|>assistant<|channel|>commentary to=functions.write_file<|constrain|>json<|message|>{\"path\":\"x\"}<|call|>";
-        let c = canonicalize_assistant_response(raw);
-        let hint = c.tool_call_hint.expect("expected hint");
-        assert_eq!(hint.tool, "write_file");
+        let (_content, hint) = canonicalize_openai_content(raw);
+        match hint {
+            Some(ActionHint::Propose { tool, .. }) => assert_eq!(tool, "write_file"),
+            other => panic!("expected Propose, got {other:?}"),
+        }
     }
 
     #[test]
-    fn canonicalize_harmony_evaluator_lines_no_recipient_no_json_returns_body() {
+    fn canonicalize_harmony_evaluator_lines_no_action_hint() {
         let raw = "<|channel|>analysis<|message|>ALLOW: looks fine\nDENY: but suspicious<|end|>";
-        let c = canonicalize_assistant_response(raw);
-        assert_eq!(c.text, "ALLOW: looks fine\nDENY: but suspicious");
-        assert!(c.tool_call_hint.is_none());
-    }
-
-    #[test]
-    fn extract_json_object_handles_braces_inside_strings() {
-        let raw = r#"prefix {"a":"} not done","b":1} suffix"#;
-        assert_eq!(
-            extract_json_object(raw),
-            Some(r#"{"a":"} not done","b":1}"#)
-        );
+        let (content, hint) = canonicalize_openai_content(raw);
+        assert_eq!(content, "ALLOW: looks fine\nDENY: but suspicious");
+        assert!(hint.is_none());
     }
 }

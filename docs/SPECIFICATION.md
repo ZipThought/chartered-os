@@ -133,7 +133,7 @@ block-beta
 
 The cognition layer may know the rules — behavioral spec, governance Scopes (when grounding is on), Role context, rejection feedback. What it cannot do is enforce them. Only the Runtime gates tool calls, writes Receipts, and dispatches effects. Cognition cannot influence the Evaluator except by producing a proposal — see *Structural Separation* (the persuasive-context-exclusion invariant).
 
-The Runtime manages cognition as infrastructure — assembling prompts, managing prefix caching, dispatching to the preconfigured model backend, enforcing resource limits. The interface between Runtime and cognition handles multiple response formats so that any model backend works without special configuration.
+Cognition is commodity; governance is the value proposition. The Runtime manages cognition as infrastructure — assembling prompts, managing prefix caching, dispatching to the preconfigured model backend, enforcing resource limits. The interface between Runtime and cognition handles multiple response formats so that any cognition implementation satisfies the kernel's contract without special configuration.
 
 ---
 
@@ -255,7 +255,11 @@ Frames are immutable once deployed. A new version is a new Frame ID. The Snapsho
 
 ## Tools
 
-Tools are the Runtime's typed action vocabulary. The Steward has no raw access; every action is a tool call. Reference Tools form an artifact-substrate ABI of eight uniform operations:
+Tools are the Runtime's typed action vocabulary. The Steward has no raw access; every action is a tool call.
+
+**LLM-side native tools are cognition, not Tools.** Model APIs expose "native" tools the LLM may invoke as part of producing its output — web search, code execution in the vendor's sandbox, URL fetching, vector-store lookup. These run inside the model vendor's surface; their results enter the LLM's response as cognition input. The Runtime treats them as part of cognition (see *Where Governance Applies and Where It Does Not*) — the LLM has no path to act on the Steward's behalf outside what the Charter exposes as Tools (see *Tool Registry Is the Only Path* in CHECKLIST). If a capability needs governance, the Charter exposes it as a Tool; LLM-native tools are not a substitute.
+
+Reference Tools form an artifact-substrate ABI of eight uniform operations:
 
 - **`read_artifact(artifact_id, selector)`** — project current state through a Selector.
 - **`list_artifacts(parent_id, filter)`** — enumerate sub-artifacts.
@@ -337,13 +341,13 @@ For multi-deployment use, a per-host or per-organization daemon owns the Receipt
 
 Every governed proposal produces a Receipt — the append-only record of one Gate step. Receipts feed three downstream consumers: the Actor (via the *Refinement signal* projected from a denied Receipt), the Professional (via the Receipt trail), and offline regression and incident analysis (via stored Receipt sets).
 
-Receipt content: `task_id`, `attempt_id` (absent for controller events), `tool_call`, `verdicts` (one Verdict per applicable Steward-owned Frame), `outcome`, `timestamp`, `enforcement_level`, `intercept_complete` (false on any partial-coverage condition — Evaluator unreachable, durability degraded, peer-process timeout), `charter_version`, `role_context_version`, `snapshot_id`.
+Receipt content: `receipt_id`, `task_id`, `attempt_id` (absent for controller events), `steward_id`, `tool_call`, `verdicts` (one Verdict per applicable Steward-owned Frame), `outcome`, `timestamp`, `intercept_complete` (false on any partial-coverage condition — Evaluator unreachable, durability degraded, peer-process timeout), `governance_mode` (the (grounding, evaluation) toggle pair active for this evaluation), `charter_version`, `role_context_version`, `snapshot_id`.
 
 **Durability.** Two tiers. **Critical** (denials, plus any Verdict against a Frame marked `critical: true`): the Receipt is `fdatasync`-persisted before the next Actor step. Persistence failure → denial. **Buffered** (allowed actions under non-critical Frames): append to a ring buffer; background flusher persists at configured cadence. Loss bound: flush interval × throughput.
 
 **Confidentiality.** Receipts may carry argv, paths, message bodies, query strings, headers. The store applies access control on query, per-field redaction (declared-sensitive Frame fields), retention with rotation, tamper-evidence.
 
-**Storage.** Append-only. SQLite default with per-day partitioning, or append-only file. WAL. No ORM.
+**Storage.** Via the unified primitive (see *Persistence*).
 
 **Refinement signal.** When the Gate denies, the Runtime projects each UNGROUNDED Verdict into a `{frame_ref, reason}` pair and returns the set to the Actor. The Receipt is the durable record; the Refinement signal is the live message back into the loop. Same source, different consumers, different shapes.
 
@@ -351,13 +355,43 @@ Receipt content: `task_id`, `attempt_id` (absent for controller events), `tool_c
 
 ---
 
+## Persistence
+
+One async append-only primitive serves every durable stream — Receipt log, Cognition log, Findings. One open/append/fsync discipline. One serialization-failure contract: write failure surfaces to the caller; silent rewrite to placeholder is forbidden (`AGENTS.md §Error Discipline > Semantic Integrity Under Failure`). In-memory mirrors are derived from the on-disk record and update only after durable success.
+
+---
+
+## Snapshot Lifecycle
+
+Snapshots are content-addressed (see *Vocabulary > Snapshot*). Each Snapshot persists as one content-immutable file under `<chartered_dir>/snapshots/<snapshot_id>.json` — the same write+fsync discipline as the unified streaming primitive (see *Persistence*), applied to a single-shot object write rather than an append. Stable references: the Snapshot ID embedded in every Receipt resolves to a persisted Snapshot record. Append-only: new Snapshots are added as new files; existing files are never mutated. Pruning: files for old Snapshots are deleted when no longer referenced.
+
+---
+
+## Skills
+
+Actor-side cognition instrumentation following the SKILL.md convention. The Actor consults Skills during cognition; any tool call produced under a Skill's guidance crosses the Gate (see *The Loop*). Skills do not constitute a new Tool category and do not bypass the Charter's `permitted_tools`.
+
+---
+
+## Subagents
+
+A Steward may spawn a subagent via a tool call. The spawn proposal crosses the Gate like any other tool call; the spawned subagent runs its own loop with its own Snapshot, and every tool call inside the subagent's loop crosses its own Gate. Subagents do not constitute a new governance surface — they are recursive instances of the existing one.
+
+---
+
+## User-Facing Integration Boundary
+
+The agent is never the primary UI. Product UIs that consume CharteredOS deployments interact with the Runtime, not with the Actor's cognition. The user does not see the agent; the user sees product surfaces backed by Receipt-governed effects.
+
+---
+
 ## The Protocol
 
 The Runtime's contract is a typed proposal-and-Verdict protocol. Definitions live in `proto/v1/`:
 
-- `tool_call.proto` — the `ToolCall` packet (`tool_name`, `tool_params`, `context_id`, `source_id`, `timestamp`).
-- `verdict.proto` — `Verdict` (per-Frame Ruling + within-Frame trace), `EvaluatorEntry`, `Metrics`.
-- `receipt.proto` — `Receipt`, `Outcome` enum, `EnforcementLevel` enum.
+- `tool_call.proto` — the `ToolCall` packet (`tool`, `tool_params`, `context_id`, `source_id`).
+- `verdict.proto` — `FrameRef` (Steward-scoped Frame identity), `Verdict` (Ruling + reason + within-Frame `EvaluatorEntry` trace).
+- `receipt.proto` — `Receipt`, `Outcome` enum, `GovernanceMode` (the (grounding, evaluation) toggle pair).
 
 Versioned by field numbering. New fields ignored by old readers; absent fields default.
 
