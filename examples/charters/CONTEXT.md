@@ -17,8 +17,28 @@ Charters point here. Inherits root `CONTEXT.md`. Loaded by
   (operator-supplied facts).
 - `coding-agent/` — filesystem scope, no privilege escalation, no
   destructive ops without confirmation, no exfiltration. All declared
-  scopes are Charter (framework authority). The framework's primary
-  deliverable target.
+  scopes are Charter (framework authority).
+
+## Verification-pipeline Charters
+
+The Stewards that produce and label the verification corpus are
+themselves chartered; they share the kernel and the Receipt machinery
+with production Stewards.
+
+- `synthetic-data/` — generator Steward. Frames over real-world-
+  likeness, scenario novelty, technique coverage, failure-class
+  discipline, claimed-label explicitness. One scenario per Task,
+  appended to a `kind=record-store` corpus artifact.
+- `gold-labeler/` — oracle Steward. Frames over judgment-traceable-
+  to-Scope, label-uses-Charter-Frames, blinding-from-generator-claim.
+  One label per Task, appended to a labels artifact, blind to the
+  generator's claimed label.
+- `same-context-baseline/` — strawman Charter the harness contrasts
+  against the production Charter. No Frames; the harness pairs it
+  with passthrough governance mode in `chartered.toml`. Outcomes
+  that diverge between this Charter and the separated production
+  Charter identify scenarios where structural separation is the
+  load-bearing mechanism.
 
 ## File layout per domain
 

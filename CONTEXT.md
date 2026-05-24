@@ -22,15 +22,25 @@ any phase complete.
   `chartered-dispatch`. Quarantines `std::fs` / `std::process` /
   `tokio::fs` / `tokio::process` / `tokio::net`. The only path from
   the Runtime's Tool dispatcher to the operating system.
-- `runtime/` — per-deployment Runtime binary. Cargo: `chartered-runtime`.
-  Spec §The Runtime. **E2E targets this binary**; library-based
-  reconstruction is forbidden. Per-run persistence
+- `runtime/` — per-deployment Runtime binary AND library API. Cargo:
+  `chartered-runtime`. Spec §The Runtime. Exposes
+  `chartered_runtime::Agent` for in-process embedding; the binary is
+  a thin wrapper. E2E may target either surface. Per-run persistence
   (`receipts.jsonl`, `cognition.jsonl`) lives under
   `<chartered_dir>/runs/<run_id>/` — grep-able, isolated per
-  invocation, no daemon.
+  invocation.
 - `tracer/` — companion syscall-trace tool. Cargo: `chartered-tracer`.
   NOT part of the Gate architecture; peer to Docker / gVisor / strace.
+- `dashboard/` — local workspace console. Node-served static UI + thin
+  local API that subprocess-spawns the Runtime per invocation. Not a
+  Cargo crate; not on the trust boundary. Spec §User-Facing
+  Integration Boundary.
+- `daemon/` — placeholder for the cross-deployment Receipt store and
+  operator surface (spec §The Runtime). Not implemented; single-
+  deployment runs use the Runtime alone.
 - `examples/charters/` — Reference Charter templates per domain.
+- `examples/demo/` — runnable M&A diligence deployment.
+- `examples/scenarios/` — committed eval corpora per Charter.
 
 ## Naming convention
 

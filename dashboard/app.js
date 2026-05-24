@@ -58,6 +58,28 @@ function isLoopSentinel(toolName) {
   return toolName === "<halt>" || toolName === "<fail>";
 }
 
+// Mirrors `runtime/src/agent.rs::tool_externalizes`. Read-shaped Tools
+// from the spec's eight-operation Artifact ABI plus the kernel's
+// sentinel Receipts do not produce externally observable effects on
+// dispatch. Everything else does (modify_artifact, write_file,
+// exec_command, channel-shaped Tools, etc.). Used to mark the
+// internal-vs-external distinction throughout the Receipts UI.
+const INTERNAL_TOOLS = new Set([
+  "read_artifact",
+  "list_artifacts",
+  "query_artifact",
+  "subscribe_artifact",
+  "cite_artifact",
+  "attest_artifact",
+  "ask_question",
+  "<halt>",
+  "<actor_failure>",
+  "<budget_exhausted>",
+]);
+function toolExternalizes(toolName) {
+  return !INTERNAL_TOOLS.has(toolName);
+}
+
 // ─────────────────────────────────────────────
 // API
 // ─────────────────────────────────────────────
@@ -378,10 +400,18 @@ function summarizeRunInBanner(action, run) {
   const receipts = (stdout.receipts ?? []).filter(
     (r) => !isLoopSentinel(r.tool_call?.tool),
   );
+  // Top-level categorical outcome the binary emits: Externalized,
+  // Quiet, Escalated, Failed. Used as the primary banner label so a
+  // viewer sees the loop's restraint-or-effect summary at a glance.
+  const agentOutcome = stdout.outcome?.kind;
   if (receipts.length === 0) {
+    const text =
+      agentOutcome === "quiet"
+        ? `${action.name} → quiet (Steward observed and chose not to externalize)`
+        : `${action.name}: no Gate-evaluable Tool call produced (Steward halted)`;
     pushBanner({
-      kind: "warn",
-      text: `${action.name}: no Gate-evaluable Tool call produced (Steward halted)`,
+      kind: agentOutcome === "quiet" ? "ok" : "warn",
+      text,
     });
     return;
   }
@@ -390,10 +420,11 @@ function summarizeRunInBanner(action, run) {
   const ungrounded = (last.verdicts ?? []).filter(
     (v) => v.ruling === "Ungrounded",
   );
+  const summary = agentOutcome ? ` [${agentOutcome}]` : "";
   let text;
   let kind;
   if (outcome === "Allowed" || outcome === "Passthrough") {
-    text = `${action.name} → ${outcome}`;
+    text = `${action.name} → ${outcome}${summary}`;
     kind = "ok";
   } else {
     const reasons =
@@ -402,7 +433,7 @@ function summarizeRunInBanner(action, run) {
             .map((v) => `${frameRefId(v)}: ${v.reason}`)
             .join(" · ")
         : "no specific frame reason";
-    text = `${action.name} → ${outcome} — ${reasons}`;
+    text = `${action.name} → ${outcome}${summary} — ${reasons}`;
     kind = outcome === "Denied" ? "warn" : "danger";
   }
   pushBanner({ kind, text, receipt_id: last.receipt_id });
@@ -904,6 +935,7 @@ function ReceiptPage(props) {
               <span>attempt · ${r.attempt_id ?? "controller"}</span>
               <span>tool · ${r.tool_call?.tool}</span>
               <span style=${`color:${OUTCOME[r.outcome]?.fg};font-weight:600;`}>${r.outcome}</span>
+              <span style=${`color:${toolExternalizes(r.tool_call?.tool) ? "var(--err)" : "var(--t2)"};font-weight:600;`}>${toolExternalizes(r.tool_call?.tool) ? "external" : "internal"}</span>
               <span>charter · v${r.charter_version}</span>
               <span>role_ctx · v${r.role_context_version}</span>
               <span>snapshot · ${String(r.snapshot_id).slice(0, 12)}…</span>
@@ -950,10 +982,66 @@ function ReceiptPage(props) {
                 <${CognitionPanes} entries=${cog} role="eval"/>
               </div>
             </div>
+
+            <h2>Reconciliation</h2>
+            <${ReconciliationPane} receipt=${r}/>
           `;
         }}
       <//>
     </div>
+  `;
+}
+
+function ReconciliationPane(props) {
+  const r = () => props.receipt;
+  return html`
+    ${() => {
+      const rec = r();
+      const tool = rec?.tool_call?.tool;
+      const params = rec?.tool_call?.params ?? {};
+      const outcome = rec?.outcome;
+      const externalizing = toolExternalizes(tool);
+      if (!externalizing) {
+        return html`
+          <div class="struct-sep">
+            Reconciliation: this Tool is internal-only. The Receipt
+            documents the Steward's consideration; no externally
+            observable effect followed the dispatch.
+          </div>
+        `;
+      }
+      if (outcome !== "Allowed" && outcome !== "Passthrough") {
+        return html`
+          <div class="struct-sep">
+            Reconciliation: outcome is ${outcome}. The Tool dispatch
+            never ran, so no externally observable effect should
+            exist in the workspace.
+          </div>
+        `;
+      }
+      const lines = ["Reconciliation: this Receipt asserts the following effect landed."];
+      if (tool === "write_file" || tool === "read_file") {
+        if (params.path) lines.push(`Target path: ${params.path}`);
+      }
+      if (tool === "exec_command") {
+        if (params.cmd) lines.push(`Command: ${params.cmd}`);
+      }
+      if (tool === "modify_artifact") {
+        if (params.kind) lines.push(`Artifact kind: ${params.kind}`);
+        if (params.artifact_id) lines.push(`Artifact id: ${params.artifact_id}`);
+        if (params.edit?.append) {
+          const a = params.edit.append;
+          if (a.detail) lines.push(`Appended detail: ${String(a.detail).slice(0, 200)}`);
+          if (a.severity) lines.push(`Severity: ${a.severity}`);
+        }
+      }
+      lines.push("Verify by inspecting the workspace tree at left.");
+      return html`
+        <div class="struct-sep">
+          ${lines.join(" · ")}
+        </div>
+      `;
+    }}
   `;
 }
 
@@ -1150,7 +1238,10 @@ function RightArtifact() {
                 <span class="ctx-t">${r.tool_call?.tool}</span>
                 <span class="badge" style=${`color:${OUTCOME[r.outcome]?.fg};background:${OUTCOME[r.outcome]?.bg};`}>${r.outcome}</span>
               </div>
-              <div class="ctx-meta">${tsLabel(r.timestamp)} · ${String(r.receipt_id).slice(0, 10)}…</div>
+              <div class="ctx-meta">
+                ${tsLabel(r.timestamp)} · ${String(r.receipt_id).slice(0, 10)}…
+                · <span title=${toolExternalizes(r.tool_call?.tool) ? "Tool externalizes — dispatch produces a downstream-observable effect." : "Tool is internal-only — no externally observable effect."} style=${`font-weight:600;color:${toolExternalizes(r.tool_call?.tool) ? "var(--err)" : "var(--t2)"};`}>${toolExternalizes(r.tool_call?.tool) ? "external" : "internal"}</span>
+              </div>
             </div>
           `}
         <//>

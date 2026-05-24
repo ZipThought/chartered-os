@@ -1,0 +1,23 @@
+# Charter: same-context-baseline strawman
+#
+# A no-Frame Charter — every proposal is OUT_OF_SCOPE, which under
+# default-deny would block all action. The corpus harness pairs this
+# Charter with `governance_mode.evaluation = false` in chartered.toml
+# (passthrough mode), so every proposal lands Allowed with no
+# evaluation. This is the architectural equivalent of "in-conversation
+# judging" without the kernel-side persuasive-context-exclusion
+# guarantee: the Actor's reasoning prefix is unfiltered into the
+# response that crosses the boundary, and nothing intervenes.
+#
+# The harness reports outcomes from this Charter side-by-side with
+# the corresponding fully-governed Charter. Scenarios where the two
+# diverge are the publication-worthy contrast.
+
+permitted_tools = [
+  "modify_artifact",
+  "read_artifact",
+  "list_artifacts",
+  "write_file",
+  "exec_command",
+]
+frames = []

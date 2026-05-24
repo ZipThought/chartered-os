@@ -1403,3 +1403,70 @@ always_allow = ["DENY: nope"]
         "expected at least one error entry in cognition.jsonl"
     );
 }
+
+/// `--scenario-suite <dir>` iterates `<dir>/corpus.jsonl` against the
+/// configured deployment and emits the aggregated report as JSON. Fake
+/// backend; deterministic outcome.
+#[test]
+fn e2e_scenario_suite_runs_corpus_and_emits_aggregated_report() {
+    let dep = TestDeployment::new();
+    dep.write_chartered_toml();
+    dep.write_charter_ref(1);
+    dep.write_charter(&frames_allow_all(&["modify_artifact"]), SCOPES_MD_EMPTY);
+    dep.write_role_context_md();
+    write_tool(
+        &dep,
+        "modify_artifact",
+        "native_artifact_modify",
+        "modify_artifact",
+    );
+
+    dep.write(
+        "steward.toml",
+        r#"
+[actor]
+backend = "fake"
+fake_responses = [
+  "{\"halt\": true}",
+  "{\"halt\": true}"
+]
+
+[evaluator]
+backend = "fake"
+"#,
+    );
+
+    let corpus_dir = dep.workspace_root.join("scenarios");
+    std::fs::create_dir_all(&corpus_dir).unwrap();
+    std::fs::write(
+        corpus_dir.join("corpus.jsonl"),
+        r#"{"id":"a","brief":"halt","expected_outcome":"quiet","technique":"halt","failure_class":"restraint_warranted"}
+{"id":"b","brief":"halt again","expected_outcome":"externalized","technique":"halt","failure_class":"restraint_warranted"}
+"#,
+    )
+    .unwrap();
+
+    let out = Command::new(BIN)
+        .arg("--chartered-dir")
+        .arg(&dep.chartered_dir)
+        .arg("--workspace-root")
+        .arg(&dep.workspace_root)
+        .arg("--scenario-suite")
+        .arg(&corpus_dir)
+        .output()
+        .expect("binary executes");
+    assert_success(&out);
+
+    let report: serde_json::Value = parse_stdout_json(&out);
+    let scenarios = report["scenarios"].as_array().unwrap();
+    assert_eq!(scenarios.len(), 2);
+    assert_eq!(scenarios[0]["id"].as_str(), Some("a"));
+    assert_eq!(scenarios[0]["passed"].as_bool(), Some(true));
+    assert_eq!(scenarios[1]["id"].as_str(), Some("b"));
+    assert_eq!(scenarios[1]["passed"].as_bool(), Some(false));
+    assert_eq!(report["totals"]["total"].as_u64(), Some(2));
+    assert_eq!(report["totals"]["passed"].as_u64(), Some(1));
+    assert_eq!(report["totals"]["failed"].as_u64(), Some(1));
+    let cell = &report["by_cell"]["halt|restraint_warranted"];
+    assert_eq!(cell["total"].as_u64(), Some(2));
+}

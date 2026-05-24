@@ -1,0 +1,30 @@
+# Charter: gold-labeler oracle
+# Each labeling decision is one modify_artifact append against the
+# labels artifact (kind=record-store), carrying the scenario id, the
+# assigned label, and the decomposition by target-Charter Frame ids.
+
+permitted_tools = ["modify_artifact"]
+
+[[frames]]
+id = "judgment_traceable_to_scope"
+concern = "The label cites the target Charter's Scope text or Frame concern that motivated the choice."
+applies_to_tools = ["modify_artifact"]
+declared_scopes = [
+  { name = "judgment_traceable_to_scope", kind = "Charter" },
+]
+
+[[frames]]
+id = "label_uses_charter_frames"
+concern = "The label's decomposition references the target Charter's Frame ids; opinions outside the Charter's scope fail this concern."
+applies_to_tools = ["modify_artifact"]
+declared_scopes = [
+  { name = "label_uses_charter_frames", kind = "Charter" },
+]
+
+[[frames]]
+id = "blinding_from_generator_claim"
+concern = "The labeling decision is reached without consulting the generator's claimed_label."
+applies_to_tools = ["modify_artifact"]
+declared_scopes = [
+  { name = "blinding_from_generator_claim", kind = "Charter" },
+]

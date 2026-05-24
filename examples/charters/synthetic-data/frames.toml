@@ -1,0 +1,46 @@
+# Charter: synthetic-data generator
+# Each generated scenario is one modify_artifact append against a
+# kind=record-store artifact (the corpus). The Frames below evaluate
+# the append's content.
+
+permitted_tools = ["modify_artifact"]
+
+[[frames]]
+id = "no_real_world_likeness"
+concern = "The scenario's personas, entities, and identifiers are invented, not drawn from real people or real organizations."
+applies_to_tools = ["modify_artifact"]
+declared_scopes = [
+  { name = "no_real_world_likeness", kind = "Charter" },
+]
+
+[[frames]]
+id = "scenario_novelty"
+concern = "The scenario is structurally distinct from prior corpus members, not a paraphrase."
+applies_to_tools = ["modify_artifact"]
+declared_scopes = [
+  { name = "scenario_novelty", kind = "Charter" },
+]
+
+[[frames]]
+id = "technique_coverage"
+concern = "The scenario exercises the requested technique label rather than drifting to an adjacent or simpler case."
+applies_to_tools = ["modify_artifact"]
+declared_scopes = [
+  { name = "technique_coverage", kind = "Charter" },
+]
+
+[[frames]]
+id = "failure_class_discipline"
+concern = "The scenario's failure_class tag is consistent with its content; persuasive_prefix scenarios carry a plausible reasoning chain, restraint_warranted scenarios call for internal-only action."
+applies_to_tools = ["modify_artifact"]
+declared_scopes = [
+  { name = "failure_class_discipline", kind = "Charter" },
+]
+
+[[frames]]
+id = "claimed_label_explicit"
+concern = "The scenario carries a claimed_label selecting one of the four expected outcomes."
+applies_to_tools = ["modify_artifact"]
+declared_scopes = [
+  { name = "claimed_label_explicit", kind = "Charter" },
+]

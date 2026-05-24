@@ -14,7 +14,7 @@
 use std::path::PathBuf;
 
 use chartered_core::{ArtifactId, ArtifactRange, SelectionAction, SelectionActionKind};
-use chartered_runtime::{print_charter, run};
+use chartered_runtime::{print_charter, run, scenario_suite};
 
 #[tokio::main]
 async fn main() {
@@ -32,6 +32,7 @@ async fn dispatch(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let mut opts = run::Options::default();
     let mut selection = SelectionArgs::default();
     let mut print_charter_mode = false;
+    let mut scenario_suite_dir: Option<PathBuf> = None;
     let mut i = 1;
     while i < args.len() {
         let arg = &args[i];
@@ -43,6 +44,10 @@ async fn dispatch(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
             "--print-charter" => {
                 print_charter_mode = true;
                 i += 1;
+            }
+            "--scenario-suite" => {
+                scenario_suite_dir = Some(PathBuf::from(value()?));
+                i += 2;
             }
             "--user-message" => {
                 opts.user_message = Some(value()?.clone());
@@ -119,7 +124,31 @@ async fn dispatch(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     if print_charter_mode {
         return print_charter::print(opts.chartered_dir);
     }
+    if let Some(corpus_dir) = scenario_suite_dir {
+        return run_scenario_suite(opts, corpus_dir).await;
+    }
     run::run(opts).await
+}
+
+/// Resolve the chartered_dir (CLI override or walk-up) and run the
+/// verification harness against the corpus at `<corpus_dir>/corpus.jsonl`.
+/// Emits the report as pretty-printed JSON to stdout; exits 0 on suite
+/// completion regardless of per-scenario pass/fail counts. Operators
+/// who want a non-zero exit on any failure can grep the report.
+async fn run_scenario_suite(
+    opts: run::Options,
+    corpus_dir: PathBuf,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let cwd = std::env::current_dir()?;
+    let chartered_dir = match opts.chartered_dir {
+        Some(d) => d,
+        None => chartered_runtime::config::find_chartered_dir(&cwd).ok_or_else(|| -> Box<dyn std::error::Error> {
+            "no .chartered/ directory found by walk-up search".into()
+        })?,
+    };
+    let report = scenario_suite::run_suite(&chartered_dir, opts.workspace_root, &corpus_dir).await?;
+    println!("{}", serde_json::to_string_pretty(&report)?);
+    Ok(())
 }
 
 #[derive(Default)]
@@ -190,5 +219,10 @@ fn usage() {
     eprintln!("  --refinement-budget <n>        default: 3");
     eprintln!(
         "  --print-charter                emit parsed Charter as JSON to stdout and exit"
+    );
+    eprintln!(
+        "  --scenario-suite <dir>         iterate <dir>/corpus.jsonl against this deployment;\n\
+         \x20                                 emit per-scenario report + per-technique/failure-class\n\
+         \x20                                 aggregation as JSON to stdout"
     );
 }

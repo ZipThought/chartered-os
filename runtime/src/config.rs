@@ -168,8 +168,11 @@ pub struct DeploymentConfig {
 impl DeploymentConfig {
     /// Build Charter, Role context, and the Skills bound to the Snapshot.
     /// Returns a tuple so the caller can compose a `Snapshot::new`.
+    /// Takes `&self` because the Agent reuses the same DeploymentConfig
+    /// across many run() calls; the underlying defs are Clone-able and
+    /// inexpensive to rebuild per run.
     pub fn build_charter<F>(
-        self,
+        &self,
         evaluator_factory: F,
     ) -> (
         chartered_core::Charter,
@@ -179,12 +182,16 @@ impl DeploymentConfig {
     where
         F: FnMut(&chartered_core::FrameDef) -> std::sync::Arc<dyn chartered_core::Evaluator>,
     {
-        let charter = build_charter(self.charter_def, self.charter_ref.version, evaluator_factory);
-        let role_context = match self.role_context_def {
-            Some(def) => build_role_context(def, self.role_context_version),
+        let charter = build_charter(
+            self.charter_def.clone(),
+            self.charter_ref.version,
+            evaluator_factory,
+        );
+        let role_context = match &self.role_context_def {
+            Some(def) => build_role_context(def.clone(), self.role_context_version),
             None => chartered_core::RoleContext::empty(),
         };
-        (charter, role_context, self.skills)
+        (charter, role_context, self.skills.clone())
     }
 }
 
