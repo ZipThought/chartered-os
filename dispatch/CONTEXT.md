@@ -22,9 +22,11 @@ operating system.
 - `NativeFsWrite` (`fs.rs`) — `write_file(path, content)`. Creates
   intermediate directories within the workspace root.
 - Native artifact executors (`artifact.rs`) — `read_artifact`,
-  `modify_artifact`, `record_finding`, `list_artifacts`. Artifact ids
-  are workspace-relative UTF-8 file paths; findings append to
-  `.chartered/findings.jsonl`.
+  `modify_artifact`, `list_artifacts`. Artifact ids are workspace-relative
+  UTF-8 file paths; findings are recorded by Charters as
+  `modify_artifact` calls with `kind=record-store`, appending to
+  `.chartered/<artifact_id>.jsonl` (the default record store registers
+  artifact_id `records`, persisting at `.chartered/records.jsonl`).
 - `NativeExec` (`exec.rs`) — `exec_command(cmd, args)`. Spawns,
   captures stdout/stderr, reports exit code.
 - `ExecutorRegistry` (`registry.rs`) — maps the deployment config's
@@ -43,8 +45,9 @@ denials surface as `ToolResult::Err`, never silently allow.
 
 - Tools that are not in-Runtime-native: peer-process Adapters and
   contained-subprocess executors live in their own crates (future).
-- Charter / RoleContext loading: `core::charter_loader` and
-  `runtime::config`.
+- Charter / RoleContext loading: `runtime::charter_loader` (deployment
+  IO) + `chartered_core::parse_charter_def` / `parse_role_context_def`
+  (pure kernel parsers); deployment-config loading: `runtime::config`.
 - Network tools: future.
 
 ## Tests

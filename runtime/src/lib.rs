@@ -7,7 +7,11 @@
 //! `tools/*.toml`). Nothing else differs between a test deployment
 //! and a production deployment.
 
+pub mod canonicalize;
+pub mod charter_loader;
 pub mod config;
+pub mod gemini_backend;
 pub mod openai_backend;
 pub mod persistence;
+pub mod print_charter;
 pub mod run;

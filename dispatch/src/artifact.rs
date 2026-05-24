@@ -6,10 +6,10 @@
 //!   files; reads return content (optionally sliced by Selector range);
 //!   modifies splice content at a byte range under a containment-checked
 //!   path.
-//! - `FilesystemFindingsBackend` (`kind=findings-store`) — backed by
-//!   `<workspace_root>/.chartered/findings.jsonl`; reads return the
-//!   filtered list (optionally narrowed by a Selector `filter`); modifies
-//!   append one Finding record.
+//! - `FilesystemRecordStore` (`kind=record-store`) — backed by
+//!   `<chartered_dir>/<artifact_id>.jsonl`; reads return the filtered
+//!   list (optionally narrowed by a Selector `filter`); modifies append
+//!   one Record with kernel-injected provenance.
 //!
 //! Both Backends are constructed with the canonical workspace root and
 //! reject any path that resolves outside it (after canonicalization, so
@@ -19,9 +19,9 @@ use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
 use chartered_core::{
-    Artifact, ArtifactBackend, ArtifactId, ArtifactKindId, Edit, Finding, Projection, Selector,
-    apply_text_edit, kind_findings_store, kind_text, parse_findings_append,
-    parse_findings_filter, parse_text_edit, parse_text_range_from_selector, slice_range,
+    Artifact, ArtifactBackend, ArtifactId, ArtifactKindId, Edit, Projection, Record, Selector,
+    apply_text_edit, kind_record_store, kind_text, parse_record_append, parse_record_filter,
+    parse_text_edit, parse_text_range_from_selector, slice_range,
 };
 
 use crate::fs::{ensure_within_root, resolve_existing, resolve_for_write};
@@ -109,38 +109,47 @@ impl ArtifactBackend for FilesystemTextBackend {
 }
 
 // ============================================================
-// kind=findings-store — `.chartered/findings.jsonl`
+// kind=record-store — `.chartered/<artifact_id>.jsonl`
 // ============================================================
 
-/// `kind=findings-store` Backend backed by
-/// `<workspace_root>/.chartered/findings.jsonl`. Exposes one artifact
-/// (`findings`); `read` returns the filtered list, `modify` appends one
-/// Finding record (durably synced before returning).
-pub struct FilesystemFindingsBackend {
+/// `kind=record-store` Backend backed by a JSONL file under
+/// `<chartered_dir>/<artifact_id>.jsonl`. Exposes one artifact whose id
+/// the constructor takes; `read` returns the filtered list of records
+/// (each line one JSON object), `modify` appends one Record (durably
+/// synced before returning). The kernel injects runtime provenance into
+/// the Edit; the Steward-supplied content fields are persisted at the
+/// top level alongside provenance for uniform filtering.
+pub struct FilesystemRecordStore {
     kind: ArtifactKindId,
     artifact_id: ArtifactId,
-    findings_path: PathBuf,
+    file_path: PathBuf,
+    sink: crate::persistence::JsonlSink,
 }
 
-impl FilesystemFindingsBackend {
-    /// Built from the central `DeploymentPaths`. Findings live in
-    /// `paths.chartered_dir()` alongside other per-deployment audit
-    /// state (per-run receipts, role-context versions, etc.), not
-    /// under `workspace_root` — deployments that point
-    /// `--workspace-root` and `--chartered-dir` at independent paths
-    /// still produce a single findings stream.
-    pub fn new(paths: &DeploymentPaths) -> Self {
-        let findings_path = paths.chartered_dir().join("findings.jsonl");
-        Self {
-            kind: kind_findings_store(),
-            artifact_id: ArtifactId::new("findings"),
-            findings_path,
-        }
+impl FilesystemRecordStore {
+    /// Built from the central `DeploymentPaths`. The store's file lives
+    /// at `paths.chartered_dir()/<artifact_id>.jsonl` so deployments
+    /// that point `--workspace-root` and `--chartered-dir` at
+    /// independent paths still produce a single record stream per
+    /// artifact id. Each ArtifactId gets its own file; multiple
+    /// record-store Backends can coexist in one deployment.
+    pub async fn new(
+        paths: &DeploymentPaths,
+        artifact_id: ArtifactId,
+    ) -> std::io::Result<Self> {
+        let file_path = paths.chartered_dir().join(format!("{artifact_id}.jsonl"));
+        let sink = crate::persistence::JsonlSink::create(&file_path).await?;
+        Ok(Self {
+            kind: kind_record_store(),
+            artifact_id,
+            file_path,
+            sink,
+        })
     }
 }
 
 #[async_trait]
-impl ArtifactBackend for FilesystemFindingsBackend {
+impl ArtifactBackend for FilesystemRecordStore {
     fn kind(&self) -> &ArtifactKindId {
         &self.kind
     }
@@ -159,18 +168,18 @@ impl ArtifactBackend for FilesystemFindingsBackend {
     ) -> Result<Projection, String> {
         if artifact_id != &self.artifact_id {
             return Err(format!(
-                "findings-store has no artifact `{artifact_id}` (only `{}` exists)",
+                "record-store has no artifact `{artifact_id}` (only `{}` exists)",
                 self.artifact_id
             ));
         }
-        let filter = parse_findings_filter(selector)?;
-        let raw = match tokio::fs::read_to_string(&self.findings_path).await {
+        let filter = parse_record_filter(selector)?;
+        let raw = match tokio::fs::read_to_string(&self.file_path).await {
             Ok(s) => s,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
             Err(e) => {
                 return Err(format!(
                     "read failed for {}: {e}",
-                    self.findings_path.display()
+                    self.file_path.display()
                 ));
             }
         };
@@ -182,7 +191,7 @@ impl ArtifactBackend for FilesystemFindingsBackend {
             let v: serde_json::Value = serde_json::from_str(line).map_err(|e| {
                 format!(
                     "parse failed for {} line {}: {e}",
-                    self.findings_path.display(),
+                    self.file_path.display(),
                     lineno + 1
                 )
             })?;
@@ -191,62 +200,35 @@ impl ArtifactBackend for FilesystemFindingsBackend {
             }
         }
         Ok(Projection(serde_json::json!({
-            "findings": records,
+            "records": records,
         })))
     }
 
     async fn modify(&self, artifact_id: &ArtifactId, edit: &Edit) -> Result<Projection, String> {
         if artifact_id != &self.artifact_id {
             return Err(format!(
-                "findings-store has no artifact `{artifact_id}` (only `{}` exists)",
+                "record-store has no artifact `{artifact_id}` (only `{}` exists)",
                 self.artifact_id
             ));
         }
-        let append = parse_findings_append(edit)?;
-        // Finding IDs are derived from the admitting receipt — durable
+        let append = parse_record_append(edit)?;
+        // Record IDs are derived from the admitting receipt — durable
         // and unique across runs without an in-process counter.
-        let finding = Finding {
-            id: format!("finding-{}", append.receipt_id),
+        let record = Record {
+            id: format!("record-{}", append.receipt_id),
             task_id: append.task_id,
-            author_steward_id: append.author_steward_id,
+            steward_id: append.steward_id,
             snapshot_id: append.snapshot_id,
-            artifact_id: append.artifact_id,
-            range: append.range,
-            concern: append.concern,
-            severity: append.severity,
-            detail: append.detail,
-            admitting_receipt_id: append.receipt_id,
+            receipt_id: append.receipt_id,
+            content: append.content,
         };
-        let finding_id = finding.id.clone();
-        if let Some(parent) = self.findings_path.parent() {
-            tokio::fs::create_dir_all(parent)
-                .await
-                .map_err(|e| format!("creating parent {}: {e}", parent.display()))?;
-        }
-        let mut line = serde_json::to_string(&finding)
-            .map_err(|e| format!("serialize finding {finding_id}: {e}"))?;
-        line.push('\n');
-        append_utf8(&self.findings_path, &line).await?;
-        Ok(Projection(serde_json::json!({ "finding_id": finding_id })))
+        let record_id = record.id.clone();
+        self.sink
+            .append(&record)
+            .await
+            .map_err(|e| format!("append record {record_id} to {}: {e}", self.file_path.display()))?;
+        Ok(Projection(serde_json::json!({ "record_id": record_id })))
     }
-}
-
-async fn append_utf8(path: &Path, line: &str) -> Result<(), String> {
-    use tokio::io::AsyncWriteExt;
-
-    let mut file = tokio::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-        .await
-        .map_err(|e| format!("open {}: {e}", path.display()))?;
-    file.write_all(line.as_bytes())
-        .await
-        .map_err(|e| format!("append {}: {e}", path.display()))?;
-    file.sync_data()
-        .await
-        .map_err(|e| format!("sync {}: {e}", path.display()))?;
-    Ok(())
 }
 
 fn collect_artifacts(root: &Path, dir: &Path, out: &mut Vec<String>) -> Result<(), String> {

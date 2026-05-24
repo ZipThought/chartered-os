@@ -64,7 +64,6 @@ fn load_full_deployment_config() {
     // Charter reference
     assert_eq!(cfg.charter_ref.version, 1);
 
-    // Charter content (loaded via core::charter_loader)
     assert_eq!(cfg.charter_def.frames.len(), 4);
     assert_eq!(cfg.charter_def.permitted_tools.len(), 3);
     for f in &cfg.charter_def.frames {
@@ -124,8 +123,8 @@ fn loaded_charter_builds_into_valid_workspace() {
             fd.concern.clone(),
         ))
     };
-    let (charter, role_context) = cfg.build_charter(factory);
-    let snap = Snapshot::new(charter, role_context);
+    let (charter, role_context, skills) = cfg.build_charter(factory);
+    let snap = Snapshot::new(charter, role_context, skills);
 
     let mut registry = ToolRegistry::new();
     for t in &permitted {

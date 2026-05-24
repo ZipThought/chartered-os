@@ -1,9 +1,16 @@
 syntax = "proto3";
 package chartered.v1;
 
+// Frames are weak entities under their owning Steward; cross-boundary identity
+// is always the FrameRef pair. See docs/SPECIFICATION.md > Vocabulary > Frame.
+message FrameRef {
+  string steward_id = 1;
+  string frame_id = 2;
+}
+
 // Per-Frame decision. See docs/SPECIFICATION.md > Frames.
 message Verdict {
-  string frame_id = 1;
+  FrameRef frame_ref = 1;
   Ruling ruling = 2;
   string reason = 3;                           // one sentence; surfaces to Steward on denial
   repeated EvaluatorEntry evaluator_trace = 4;
@@ -21,7 +28,6 @@ message EvaluatorEntry {
   string evaluator_id = 1;
   Decision decision = 2;
   string observation = 3;
-  Metrics metrics = 4;
 
   // DEFER ≠ Outcome.PASSTHROUGH (receipt.proto). DEFER = chain-step "next evaluator"; PASSTHROUGH = "not evaluated".
   enum Decision {
@@ -31,11 +37,4 @@ message EvaluatorEntry {
     ESCALATE = 3;                              // chain exhausted
     DEFER = 4;
   }
-}
-
-message Metrics {
-  uint32 latency_ms = 1;
-  uint32 input_tokens = 2;      // LLM evaluator only
-  uint32 output_tokens = 3;     // LLM evaluator only
-  uint32 cache_hit_tokens = 4;  // LLM evaluator only (prompt-cache hits)
 }

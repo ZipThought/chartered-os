@@ -60,11 +60,13 @@ pub fn kind_text() -> ArtifactKindId {
     ArtifactKindId::new("text")
 }
 
-/// Reference kind: an append-only collection of `Finding` records, queried
-/// through `ArtifactBackend::read` and appended through
-/// `ArtifactBackend::modify`.
-pub fn kind_findings_store() -> ArtifactKindId {
-    ArtifactKindId::new("findings-store")
+/// Reference kind: an append-only store of structured records. The
+/// kernel injects runtime provenance (`_task_id`, `_steward_id`,
+/// `_snapshot_id`, `_receipt_id`) into the Edit; the content fields
+/// under `edit.append` are opaque to the kernel — Charters define
+/// whatever shape suits the deployment.
+pub fn kind_record_store() -> ArtifactKindId {
+    ArtifactKindId::new("record-store")
 }
 
 // ============================================================
@@ -81,8 +83,9 @@ pub struct Artifact {
 
 /// Kind-discriminated Selector. Each Backend deserializes against its own
 /// schema. For `kind=text`, contains an optional `range` field naming a
-/// byte-coordinate substring. For `kind=findings-store`, contains an
-/// optional `filter` field naming a query (severity, frame, steward, etc.).
+/// byte-coordinate substring. For `kind=record-store`, contains an
+/// optional `filter` object whose entries are field=value equality
+/// checks against the persisted record (any field; metadata or content).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Selector(pub serde_json::Value);
 
@@ -97,8 +100,11 @@ impl Selector {
 }
 
 /// Kind-discriminated Edit. For `kind=text`, names a `range` and a
-/// `replacement` substring. For `kind=findings-store`, names an `append`
-/// of one Finding record.
+/// `replacement` substring. For `kind=record-store`, names an `append`
+/// object whose fields are opaque content (the Charter defines the
+/// shape); runtime provenance flows in via `_*`-prefixed metadata at
+/// the Edit top level (injected by the kernel at `ModifyArtifact`
+/// dispatch).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Edit(pub serde_json::Value);
 
@@ -124,19 +130,22 @@ pub struct ArtifactRange {
     pub end_line: usize,
 }
 
-/// A structured record stored in a `kind=findings-store` artifact.
+/// A record persisted by a `kind=record-store` Backend. Carries the
+/// kernel-injected runtime provenance plus the Steward-supplied content
+/// (opaque to the kernel — the Charter defines the shape). Serializes
+/// flat: provenance fields plus every content field at top level.
 #[derive(Debug, Clone, Serialize)]
-pub struct Finding {
+pub struct Record {
     pub id: String,
     pub task_id: TaskId,
-    pub author_steward_id: StewardId,
+    pub steward_id: StewardId,
     pub snapshot_id: SnapshotId,
-    pub artifact_id: ArtifactId,
-    pub range: ArtifactRange,
-    pub concern: String,
-    pub severity: String,
-    pub detail: String,
-    pub admitting_receipt_id: ReceiptId,
+    pub receipt_id: ReceiptId,
+    /// Opaque content fields. Serialized into the persisted record at
+    /// top level (flattened) so query filters can match either
+    /// provenance or content uniformly.
+    #[serde(flatten)]
+    pub content: serde_json::Map<String, serde_json::Value>,
 }
 
 // ============================================================
@@ -361,33 +370,33 @@ impl ArtifactBackend for InMemoryTextBackend {
     }
 }
 
-/// `kind=findings-store` Backend backed by an in-memory `Vec<Finding>`.
-/// Exposes one artifact (typically `findings`); `read` returns the filtered
-/// list, `modify` appends one Finding.
-pub struct InMemoryFindingsBackend {
+/// `kind=record-store` Backend backed by an in-memory `Vec<Record>`.
+/// Exposes one artifact whose id the constructor takes; `read` returns
+/// the filtered list, `modify` appends one Record.
+pub struct InMemoryRecordStore {
     kind: ArtifactKindId,
     artifact_id: ArtifactId,
-    findings: Mutex<Vec<Finding>>,
+    records: Mutex<Vec<Record>>,
     counter: AtomicU64,
 }
 
-impl InMemoryFindingsBackend {
+impl InMemoryRecordStore {
     pub fn new(artifact_id: ArtifactId) -> Self {
         Self {
-            kind: kind_findings_store(),
+            kind: kind_record_store(),
             artifact_id,
-            findings: Mutex::new(Vec::new()),
+            records: Mutex::new(Vec::new()),
             counter: AtomicU64::new(0),
         }
     }
 
-    pub fn findings(&self) -> Vec<Finding> {
-        self.findings.lock().unwrap().clone()
+    pub fn records(&self) -> Vec<Record> {
+        self.records.lock().unwrap().clone()
     }
 }
 
 #[async_trait]
-impl ArtifactBackend for InMemoryFindingsBackend {
+impl ArtifactBackend for InMemoryRecordStore {
     fn kind(&self) -> &ArtifactKindId {
         &self.kind
     }
@@ -406,94 +415,95 @@ impl ArtifactBackend for InMemoryFindingsBackend {
     ) -> Result<Projection, String> {
         if artifact_id != &self.artifact_id {
             return Err(format!(
-                "findings-store has no artifact `{artifact_id}` (only `{}` exists)",
+                "record-store has no artifact `{artifact_id}` (only `{}` exists)",
                 self.artifact_id
             ));
         }
-        let filter = parse_findings_filter(selector)?;
-        let findings = self.findings.lock().unwrap();
-        let filtered: Vec<&Finding> = findings.iter().filter(|f| filter.matches(f)).collect();
+        let filter = parse_record_filter(selector)?;
+        let records = self.records.lock().unwrap();
+        let filtered: Vec<&Record> = records
+            .iter()
+            .filter(|r| {
+                let v = serde_json::to_value(r).unwrap_or(serde_json::Value::Null);
+                filter.matches_value(&v)
+            })
+            .collect();
         Ok(Projection(serde_json::json!({
-            "findings": filtered,
+            "records": filtered,
         })))
     }
 
     async fn modify(&self, artifact_id: &ArtifactId, edit: &Edit) -> Result<Projection, String> {
         if artifact_id != &self.artifact_id {
             return Err(format!(
-                "findings-store has no artifact `{artifact_id}` (only `{}` exists)",
+                "record-store has no artifact `{artifact_id}` (only `{}` exists)",
                 self.artifact_id
             ));
         }
-        let append = parse_findings_append(edit)?;
+        let append = parse_record_append(edit)?;
         let n = self.counter.fetch_add(1, Ordering::Relaxed) + 1;
-        let finding = Finding {
-            id: format!("F-{n:03}"),
+        let record = Record {
+            id: format!("record-{n:03}"),
             task_id: append.task_id,
-            author_steward_id: append.author_steward_id,
+            steward_id: append.steward_id,
             snapshot_id: append.snapshot_id,
-            artifact_id: append.artifact_id,
-            range: append.range,
-            concern: append.concern,
-            severity: append.severity,
-            detail: append.detail,
-            admitting_receipt_id: append.receipt_id,
+            receipt_id: append.receipt_id,
+            content: append.content,
         };
-        let id = finding.id.clone();
-        self.findings.lock().unwrap().push(finding);
-        Ok(Projection(serde_json::json!({ "finding_id": id })))
+        let id = record.id.clone();
+        self.records.lock().unwrap().push(record);
+        Ok(Projection(serde_json::json!({ "record_id": id })))
     }
 }
 
 // ============================================================
-// Backward-compat façade: InMemoryArtifactStore
+// In-memory façade: InMemoryArtifactStore
 // ============================================================
 
 /// Façade that bundles an in-memory text Backend + an in-memory
-/// findings-store Backend behind one ArtifactStore. Preserves the legacy
-/// API for tests and the dashboard's in-process mode while the kernel
-/// dispatches through the OS-contract substrate beneath.
+/// record-store Backend behind one ArtifactStore. Used by kernel tests
+/// and by the dashboard's in-process mode.
 pub struct InMemoryArtifactStore {
     pub store: std::sync::Arc<ArtifactStore>,
     text: std::sync::Arc<InMemoryTextBackend>,
-    findings: std::sync::Arc<InMemoryFindingsBackend>,
+    records: std::sync::Arc<InMemoryRecordStore>,
 }
 
 impl InMemoryArtifactStore {
     pub fn new<I>(artifacts: I) -> Self
     where
-        I: IntoIterator<Item = LegacyArtifact>,
+        I: IntoIterator<Item = TextArtifactSeed>,
     {
         let entries = artifacts.into_iter().map(|a| (a.id, a.content));
         let text = std::sync::Arc::new(InMemoryTextBackend::new(entries));
-        let findings =
-            std::sync::Arc::new(InMemoryFindingsBackend::new(ArtifactId::new("findings")));
+        let records =
+            std::sync::Arc::new(InMemoryRecordStore::new(ArtifactId::new("records")));
         // One Backend per kind; the ArtifactStore enforces this on
         // registration. Order is not load-bearing.
         let store = std::sync::Arc::new(
             ArtifactStore::new()
-                .with_backend(findings.clone())
+                .with_backend(records.clone())
                 .with_backend(text.clone()),
         );
         Self {
             store,
             text,
-            findings,
+            records,
         }
     }
 
-    /// Legacy accessor returning text artifacts as `LegacyArtifact { id, content }`.
-    pub fn artifacts(&self) -> Vec<LegacyArtifact> {
+    /// Accessor returning text artifacts as `TextArtifactSeed { id, content }`.
+    pub fn artifacts(&self) -> Vec<TextArtifactSeed> {
         self.text
             .entries()
             .into_iter()
-            .map(|(id, content)| LegacyArtifact { id, content })
+            .map(|(id, content)| TextArtifactSeed { id, content })
             .collect()
     }
 
-    /// Legacy accessor returning the findings collection.
-    pub fn findings(&self) -> Vec<Finding> {
-        self.findings.findings()
+    /// Accessor returning the records collection.
+    pub fn records(&self) -> Vec<Record> {
+        self.records.records()
     }
 
     pub fn artifact_store(&self) -> std::sync::Arc<ArtifactStore> {
@@ -501,10 +511,10 @@ impl InMemoryArtifactStore {
     }
 }
 
-/// Legacy text-only Artifact shape preserved for tests and the in-memory
+/// Test-seed shape: a `(id, content)` pair preserved for tests and the in-memory
 /// seeding API. New code uses `Artifact` (the kind-typed handle).
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LegacyArtifact {
+pub struct TextArtifactSeed {
     pub id: ArtifactId,
     pub content: String,
 }
@@ -598,152 +608,96 @@ pub fn apply_text_edit(
     Ok(next)
 }
 
-/// Selector shape for `kind=findings-store` artifacts. Single source of
-/// truth — both `InMemoryFindingsBackend` (kernel typed records) and
-/// `FilesystemFindingsBackend` (JSONL records on disk) parse through
-/// `parse_findings_filter` and match through this struct.
+/// Selector shape for `kind=record-store` artifacts. Generic
+/// field-equality filter: every string-valued entry in `selector.filter`
+/// matches a top-level field of the persisted record (metadata or
+/// content). Records that don't carry a queried field, or carry a
+/// different value, fall out of the projection.
 #[derive(Debug, Default)]
-pub struct FindingsFilter {
-    pub severity: Option<String>,
-    pub artifact_id: Option<String>,
-    pub task_id: Option<String>,
-    pub author_steward_id: Option<String>,
+pub struct RecordFilter {
+    pub fields: std::collections::BTreeMap<String, String>,
 }
 
-impl FindingsFilter {
-    pub fn matches(&self, f: &Finding) -> bool {
-        if let Some(s) = &self.severity
-            && &f.severity != s
-        {
-            return false;
-        }
-        if let Some(a) = &self.artifact_id
-            && &f.artifact_id.0 != a
-        {
-            return false;
-        }
-        if let Some(task_id) = &self.task_id
-            && &f.task_id.0 != task_id
-        {
-            return false;
-        }
-        if let Some(s) = &self.author_steward_id
-            && &f.author_steward_id.0 != s
-        {
-            return false;
-        }
-        true
-    }
-
-    /// Match against a JSON record (used by the disk-backed Findings
-    /// Backend, where each line is a `serde_json::Value` parsed lazily
-    /// from JSONL). Mirrors `matches(&Finding)` field-for-field on the
-    /// same kernel-defined Selector schema.
+impl RecordFilter {
+    /// Match against any JSON value with top-level fields — both the
+    /// in-memory `Record` (after serializing) and disk-backed JSONL
+    /// lines parsed back into a `serde_json::Value` use this path.
     pub fn matches_value(&self, v: &serde_json::Value) -> bool {
-        let str_field = |name: &str| v.get(name).and_then(|x| x.as_str());
-        if let Some(s) = &self.severity
-            && str_field("severity") != Some(s)
-        {
-            return false;
-        }
-        if let Some(a) = &self.artifact_id
-            && str_field("artifact_id") != Some(a)
-        {
-            return false;
-        }
-        if let Some(task_id) = &self.task_id
-            && str_field("task_id") != Some(task_id)
-        {
-            return false;
-        }
-        if let Some(s) = &self.author_steward_id
-            && str_field("author_steward_id") != Some(s)
-        {
-            return false;
+        for (name, expected) in &self.fields {
+            let actual = v.get(name).and_then(|x| x.as_str());
+            if actual != Some(expected.as_str()) {
+                return false;
+            }
         }
         true
     }
 }
 
-pub fn parse_findings_filter(selector: &Selector) -> Result<FindingsFilter, String> {
+pub fn parse_record_filter(selector: &Selector) -> Result<RecordFilter, String> {
     if selector.0.is_null() {
-        return Ok(FindingsFilter::default());
+        return Ok(RecordFilter::default());
     }
     let obj = selector
         .0
         .as_object()
-        .ok_or_else(|| "findings selector must be a JSON object".to_string())?;
+        .ok_or_else(|| "record selector must be a JSON object".to_string())?;
     let filter = obj.get("filter").and_then(|v| v.as_object());
-    let mut out = FindingsFilter::default();
+    let mut fields = std::collections::BTreeMap::new();
     if let Some(filter) = filter {
-        out.severity = filter
-            .get("severity")
-            .and_then(|v| v.as_str())
-            .map(str::to_owned);
-        out.artifact_id = filter
-            .get("artifact_id")
-            .and_then(|v| v.as_str())
-            .map(str::to_owned);
-        out.task_id = filter
-            .get("task_id")
-            .and_then(|v| v.as_str())
-            .map(str::to_owned);
-        out.author_steward_id = filter
-            .get("author_steward_id")
-            .or_else(|| filter.get("steward_id"))
-            .and_then(|v| v.as_str())
-            .map(str::to_owned);
+        for (k, val) in filter {
+            if let Some(s) = val.as_str() {
+                fields.insert(k.clone(), s.to_string());
+            }
+        }
     }
-    Ok(out)
+    Ok(RecordFilter { fields })
 }
 
-/// Edit shape for `kind=findings-store` `append`. Single source of
-/// truth — both `InMemoryFindingsBackend` and the disk-backed
-/// `FilesystemFindingsBackend` parse through `parse_findings_append`.
-/// Each backend chooses its own `Finding::id` scheme (sequential for
-/// in-memory test fixtures, receipt-derived for the durable disk
-/// backend); only the parse contract is shared.
-pub struct FindingsAppend {
+/// Append shape for `kind=record-store`. Runtime provenance comes from
+/// `_*` fields the kernel injected into the Edit at `ModifyArtifact`
+/// dispatch; the Steward-supplied content lives under `edit.append` and
+/// is opaque to the kernel — every field there flows through into the
+/// persisted record as-is, with the kernel adding `id`, `task_id`,
+/// `steward_id`, `snapshot_id`, `receipt_id` at the top level.
+pub struct RecordAppend {
     pub task_id: TaskId,
-    pub author_steward_id: StewardId,
+    pub steward_id: StewardId,
     pub snapshot_id: SnapshotId,
-    pub artifact_id: ArtifactId,
-    pub range: ArtifactRange,
-    pub concern: String,
-    pub severity: String,
-    pub detail: String,
     pub receipt_id: ReceiptId,
+    pub content: serde_json::Map<String, serde_json::Value>,
 }
 
-pub fn parse_findings_append(edit: &Edit) -> Result<FindingsAppend, String> {
+/// Read a kernel-injected `_*` metadata field at the top of the Edit
+/// object. The runtime injects `_receipt_id`, `_task_id`,
+/// `_attempt_id`, `_steward_id`, `_snapshot_id` into the Edit at the
+/// `ModifyArtifact` dispatch boundary (`edit_from_params`); Backends
+/// that need provenance read them from here. Steward-supplied payload
+/// lives under the kind-specific key (e.g. `append`); the kernel
+/// metadata namespace (`_`-prefix) does not collide with it.
+fn runtime_metadata_field<'a>(
+    obj: &'a serde_json::Map<String, serde_json::Value>,
+    name: &str,
+) -> Result<&'a str, String> {
+    obj.get(name)
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| format!("record edit missing runtime metadata field: {name}"))
+}
+
+pub fn parse_record_append(edit: &Edit) -> Result<RecordAppend, String> {
     let obj = edit
         .0
         .as_object()
-        .ok_or_else(|| "findings edit must be a JSON object".to_string())?;
+        .ok_or_else(|| "record edit must be a JSON object".to_string())?;
     let append = obj
         .get("append")
         .and_then(|v| v.as_object())
-        .ok_or_else(|| "findings edit missing required field: append".to_string())?;
-    let str_field = |name: &str| -> Result<String, String> {
-        append
-            .get(name)
-            .and_then(|v| v.as_str())
-            .map(str::to_owned)
-            .ok_or_else(|| format!("findings append missing required field: {name}"))
-    };
-    let range_value = append
-        .get("range")
-        .ok_or_else(|| "findings append missing required field: range".to_string())?;
-    Ok(FindingsAppend {
-        task_id: TaskId::new(str_field("task_id")?),
-        author_steward_id: StewardId::new(str_field("author_steward_id")?),
-        snapshot_id: SnapshotId(str_field("snapshot_id")?),
-        artifact_id: ArtifactId::new(str_field("artifact_id")?),
-        range: parse_artifact_range(range_value)?,
-        concern: str_field("concern")?,
-        severity: str_field("severity")?,
-        detail: str_field("detail")?,
-        receipt_id: ReceiptId(str_field("receipt_id")?),
+        .ok_or_else(|| "record edit missing required field: append".to_string())?;
+    Ok(RecordAppend {
+        task_id: TaskId::new(runtime_metadata_field(obj, "_task_id")?),
+        steward_id: StewardId::new(runtime_metadata_field(obj, "_steward_id")?),
+        snapshot_id: SnapshotId(runtime_metadata_field(obj, "_snapshot_id")?.to_string()),
+        receipt_id: ReceiptId(runtime_metadata_field(obj, "_receipt_id")?.to_string()),
+        content: append.clone(),
     })
 }
 
@@ -774,13 +728,16 @@ fn selector_from_params(kind: &ArtifactKindId, params: &ToolParams) -> Selector 
 }
 
 /// Edit ABI: the `edit` field carries any JSON Value (kind-shaped). For
-/// convenience, top-level `range` + `replacement` fields on the Tool params
-/// (without `edit`) are promoted to a text Edit — only when `kind=text`.
+/// convenience, top-level `range` + `replacement` fields on the Tool
+/// params (without `edit`) are promoted to a text Edit — only when
+/// `kind=text`. Runtime-injected `_*` metadata at the top of params is
+/// propagated into the Edit at the same level, so Backends that need
+/// provenance (record-store and any future tamper-evident kind) read
+/// it from the Edit they are handed. Backends that don't care ignore it.
 fn edit_from_params(kind: &ArtifactKindId, params: &ToolParams) -> Result<Edit, String> {
-    if let Some(edit) = params.0.get("edit") {
-        return Ok(Edit::from_value(edit.clone()));
-    }
-    if kind == &kind_text() {
+    let mut value = if let Some(edit) = params.0.get("edit") {
+        edit.clone()
+    } else if kind == &kind_text() {
         let range = params
             .0
             .get("range")
@@ -791,14 +748,28 @@ fn edit_from_params(kind: &ArtifactKindId, params: &ToolParams) -> Result<Edit, 
             .get("replacement")
             .ok_or_else(|| "text edit missing required field: replacement".to_string())?
             .clone();
-        return Ok(Edit::from_value(serde_json::json!({
-            "range": range,
-            "replacement": replacement,
-        })));
+        serde_json::json!({ "range": range, "replacement": replacement })
+    } else {
+        return Err(format!(
+            "modify_artifact for kind `{kind}` requires an `edit` field"
+        ));
+    };
+
+    if let (Some(edit_obj), Some(params_obj)) = (value.as_object_mut(), params.0.as_object()) {
+        for key in [
+            "_receipt_id",
+            "_task_id",
+            "_attempt_id",
+            "_steward_id",
+            "_snapshot_id",
+        ] {
+            if let Some(v) = params_obj.get(key) {
+                edit_obj.entry(key.to_string()).or_insert_with(|| v.clone());
+            }
+        }
     }
-    Err(format!(
-        "modify_artifact for kind `{kind}` requires an `edit` field"
-    ))
+
+    Ok(Edit::from_value(value))
 }
 
 pub struct ReadArtifact {
@@ -881,71 +852,3 @@ impl ToolExecutor for ListArtifacts {
     }
 }
 
-/// Sugar over `modify_artifact` against the workspace's `kind=findings-store`
-/// Backend. Preserves the legacy Tool name so existing Charters that grant
-/// `record_finding` continue to work; semantically, this Tool resolves the
-/// findings-store artifact and applies an `Edit::Append`.
-pub struct RecordFinding {
-    id: ToolId,
-    store: std::sync::Arc<ArtifactStore>,
-    findings_artifact_id: ArtifactId,
-}
-
-impl RecordFinding {
-    pub fn new(id: ToolId, store: std::sync::Arc<ArtifactStore>) -> Self {
-        Self::with_artifact_id(id, store, ArtifactId::new("findings"))
-    }
-
-    pub fn with_artifact_id(
-        id: ToolId,
-        store: std::sync::Arc<ArtifactStore>,
-        findings_artifact_id: ArtifactId,
-    ) -> Self {
-        Self {
-            id,
-            store,
-            findings_artifact_id,
-        }
-    }
-}
-
-#[async_trait]
-impl ToolExecutor for RecordFinding {
-    fn id(&self) -> &ToolId {
-        &self.id
-    }
-
-    async fn execute(&self, params: &ToolParams) -> ToolResult {
-        // Sugar over modify_artifact against kind=findings-store. Kind and
-        // findings-store artifact_id are fixed by the Tool's identity;
-        // the params shape carries the finding's content fields.
-        let p = &params.0;
-        let str_field = |name: &str| -> Result<&str, String> {
-            p.get(name)
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| format!("missing required field: {name}"))
-        };
-        let range_value = p
-            .get("range")
-            .ok_or_else(|| "missing required field: range".to_string())?;
-        let append = serde_json::json!({
-            "append": {
-                "task_id": str_field("_task_id")?,
-                "author_steward_id": str_field("_steward_id")?,
-                "snapshot_id": str_field("_snapshot_id")?,
-                "receipt_id": str_field("_receipt_id")?,
-                "artifact_id": str_field("artifact_id")?,
-                "range": range_value,
-                "concern": str_field("concern")?,
-                "severity": str_field("severity")?,
-                "detail": str_field("detail")?,
-            }
-        });
-        let edit = Edit::from_value(append);
-        let projection = self
-            .store
-            .modify(&kind_findings_store(), &self.findings_artifact_id, &edit)
-            .await?;
-        Ok(projection.0)
-    }
-}

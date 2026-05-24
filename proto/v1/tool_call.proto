@@ -1,13 +1,14 @@
 syntax = "proto3";
 package chartered.v1;
 
-import "google/protobuf/timestamp.proto";
-
 // The Steward's proposed action. See docs/SPECIFICATION.md > The Loop, > Tools.
+//
+// Timestamps live on the Receipt (one per Gate step), not on the ToolCall itself.
+// A ToolCall is the proposal; the Receipt that aggregates Verdicts over it
+// owns the temporal axis.
 message ToolCall {
-  string tool_name = 1;         // registered Tool identifier
-  bytes tool_params = 2;        // typed shape per Tool registry; serialized
+  string tool = 1;              // registered Tool identifier
+  bytes tool_params = 2;        // typed shape per Tool registry; serialized JSON in v1
   string context_id = 3;        // session / conversation / task identifier
   string source_id = 4;         // which Steward
-  google.protobuf.Timestamp timestamp = 5;
 }

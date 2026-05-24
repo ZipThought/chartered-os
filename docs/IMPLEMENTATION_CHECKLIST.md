@@ -324,6 +324,34 @@ Diagnostic: "Same Frame definitions for capability evaluation (authoring) and re
 
 ---
 
+## Test Tier Discipline
+
+Three tiers per `AGENTS.md §Verification`: unit (stateless, CI), integration (vertical cut, folder-isolated IO, CI), e2e (real LLM via production transport, local-only).
+
+### Unit Tests Are Literally Stateless
+
+Diagnostic: "For each `#[cfg(test)] mod tests` block, does any test touch the filesystem, mutate env, or share in-process state with another test case?" Any yes → tier mislabel; the test belongs under `<crate>/tests/` as integration.
+
+### Integration Tests Isolate Per Run
+
+Diagnostic: "For each test under `<crate>/tests/` that reads or writes files, does it own its own `tempfile::tempdir()`?" No → cleanup races, cross-test contamination, non-deterministic ordering. Shared `target/`-relative paths or fixed `/tmp/...` paths → violation.
+
+### E2E Tests Are Local-Only
+
+Diagnostic: "Does every test that requires a real LLM, a network call to a production endpoint, or any environment-dependent resource carry `#[ignore]`?" No → CI will execute it and fail on the missing precondition, or worse, pass silently via a soft-skip masking failure as success.
+
+Soft-skip pattern (`if !out.status.success() { return; }`, `if std::env::var("…").is_err() { return; }`) inside a non-`#[ignore]`d test → violation. `#[ignore]` is the only correct gate; soft-skip = fabricated green (`AGENTS.md §Verification`).
+
+### LLM-Using Paths Have Both Fake and Real Variants
+
+Diagnostic: "For each kernel logic path that consumes an LLM (LlmActor inner loop, LlmEvaluator decision, LlmJudge scoring, LlmTester turn), is there a fake-LLM test exercising the path AND a real-LLM e2e test validating the same shape against the production transport?" No fake side → no CI coverage of the path. No real side → transport, serde, or adapter canonicalization can break invisibly.
+
+### Mock Prohibition Inside the Codebase
+
+Diagnostic: "Does any non-vendor file under `core/`, `dispatch/`, `runtime/` define a mock of an internal trait?" Yes → violation. Internal traits get real implementations or kernel-resident test-grade implementations (`InMemoryReceiptStore`, `InMemoryArtifactStore`, `InMemoryTextBackend`, …). The only fake-of-external-service in this codebase is `FakeCognitionBackend` (the LLM is external).
+
+---
+
 ## Vocabulary Discipline
 
 Diagnostic: grep the codebase for `reject`, `block`, `refuse`, `wrapper`, `shim`, `hook` (in Runtime surface), `command` (in abstract context), `log entry` (for Receipts), `result` (for Verdicts), `guard` (for evaluator). Any hit outside kernel-mechanism context → violation. Approved terms: `SPECIFICATION.md > Vocabulary`.

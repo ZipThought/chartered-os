@@ -53,8 +53,8 @@ Real-backend impl: `runtime::openai_backend::OpenAiCompatibleBackend`.
 Same impl serves real OpenAI (`https://api.openai.com/v1` + API key)
 and local OpenAI-compatible servers (LM Studio, llama.cpp, vLLM,
 SGLang; key optional). Picked per-role via `steward.toml` `backend =
-"openai"` + env (`LLM_BASE_URL`, `LLM_MODEL`, `LLM_API_KEY`);
-`LLM_BASE_URL` is the versioned API base.
+"openai"` + env (`OPEN_AI_BASE_URL`, `OPEN_AI_MODEL`, `OPEN_AI_API_KEY`);
+`OPEN_AI_BASE_URL` is the versioned API base.
 
 Frames are Steward-owned weak entities. Any serialized cross-boundary
 reference uses `FrameRef { steward_id, frame_id }`; bare `FrameId`

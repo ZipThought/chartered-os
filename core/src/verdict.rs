@@ -241,63 +241,21 @@ impl Evaluator for LlmEvaluator {
             .complete(&request)
             .await
             .map_err(|e| EvaluatorError(format!("backend error: {e}")))?;
-        Ok(parse_evaluator_response(&self.id, &response.text))
+        // Adapter-produced `verdict_lines` are role-agnostic
+        // (decision + observation); the LlmEvaluator stamps its own id
+        // when wrapping into EvaluatorEntry. The kernel performs no
+        // text parsing — see `AGENTS.md §Verification` (all parsing at
+        // the interface boundary, internally strongly-typed).
+        Ok(response
+            .verdict_lines
+            .into_iter()
+            .map(|line| EvaluatorEntry {
+                evaluator_id: self.id.clone(),
+                decision: line.decision,
+                observation: line.observation,
+            })
+            .collect())
     }
-}
-
-pub(crate) fn parse_evaluator_response(evaluator_id: &str, text: &str) -> Vec<EvaluatorEntry> {
-    text.lines()
-        .map(str::trim)
-        .filter(|l| !l.is_empty())
-        .filter_map(|line| parse_decision_line(evaluator_id, line))
-        .collect()
-}
-
-/// Parse one line into an EvaluatorEntry. Recognized shapes:
-///   `ALLOW: reason`            — canonical
-///   `DECISION: ALLOW, REASON: reason`   — common LLM paraphrase
-///   `DECISION: ALLOW`          — degenerate paraphrase, no reason
-/// Returns None for any line that does not start with a recognized
-/// keyword somewhere in the leading tokens; the Gate's empty-trace
-/// fallback (UNGROUNDED) catches genuine garbage.
-fn parse_decision_line(evaluator_id: &str, line: &str) -> Option<EvaluatorEntry> {
-    let (head, tail) = line.split_once(':')?;
-    let head_token = head.trim().to_uppercase();
-    if let Some(decision) = decision_from_token(&head_token) {
-        return Some(EvaluatorEntry {
-            evaluator_id: evaluator_id.to_string(),
-            decision,
-            observation: tail.trim().to_string(),
-        });
-    }
-    // Tolerate "DECISION: <KEYWORD>[, REASON: ...]" paraphrases. The
-    // tail begins with the keyword; everything after the next ',' or
-    // 'REASON:' is the reason text.
-    if head_token == "DECISION" {
-        let tail = tail.trim();
-        // Split into keyword and remainder. Keyword runs to the first
-        // ',' or whitespace.
-        let kw_end = tail
-            .find(|c: char| c == ',' || c.is_whitespace())
-            .unwrap_or(tail.len());
-        let kw = tail[..kw_end].trim().to_uppercase();
-        let decision = decision_from_token(&kw)?;
-        let mut reason_part = tail[kw_end..].trim().trim_start_matches(',').trim();
-        // Drop a leading "REASON:" if present.
-        if let Some(rest) = reason_part
-            .strip_prefix("REASON:")
-            .or_else(|| reason_part.strip_prefix("Reason:"))
-            .or_else(|| reason_part.strip_prefix("reason:"))
-        {
-            reason_part = rest.trim();
-        }
-        return Some(EvaluatorEntry {
-            evaluator_id: evaluator_id.to_string(),
-            decision,
-            observation: reason_part.to_string(),
-        });
-    }
-    None
 }
 
 fn build_evaluator_system_prompt(frame_id: &FrameId, concern: &str) -> String {
@@ -322,13 +280,9 @@ fn build_evaluator_system_prompt(frame_id: &FrameId, concern: &str) -> String {
          Reply with one or more lines. Each line MUST start with one \
          of the keywords ALLOW, DENY, ESCALATE, or DEFER (uppercase, \
          literal — not a placeholder), followed by a colon and a \
-         one-sentence reason. Do not prefix the line with the literal \
-         word \"DECISION\"; start with the keyword itself.\n\n\
-         EXAMPLE valid lines:\n\
-         ALLOW: the proposal matches the policy on path containment.\n\
-         ALLOW: the response declines to disclose without identity \
-         verification, satisfying the privacy concern.\n\
-         DENY: the path escapes the workspace root.\n\n\
+         one-sentence reason grounded in this Frame's concern and \
+         scopes. Do not prefix the line with the literal word \
+         \"DECISION\"; start with the keyword itself.\n\n\
          Keyword meanings:\n\
          ALLOW   = proposal satisfies the concern (including by policy-\
                    compliant refusal/redirect).\n\
@@ -338,12 +292,3 @@ fn build_evaluator_system_prompt(frame_id: &FrameId, concern: &str) -> String {
     )
 }
 
-fn decision_from_token(tok: &str) -> Option<Decision> {
-    match tok {
-        "ALLOW" => Some(Decision::Allow),
-        "DENY" => Some(Decision::Deny),
-        "ESCALATE" => Some(Decision::Escalate),
-        "DEFER" => Some(Decision::Defer),
-        _ => None,
-    }
-}

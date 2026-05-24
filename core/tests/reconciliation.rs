@@ -35,7 +35,7 @@ async fn allowed_proposal_dispatches_send_message() {
         charter_content_hash: "recon-allow".into(),
         behavioral_spec: String::new(),
     };
-    let snap = Snapshot::new(charter, RoleContext::empty());
+    let snap = Snapshot::new(charter, RoleContext::empty(), Vec::new());
     let steward = make_steward("sut", snap, registry);
     let ws = Arc::new(
         Workspace::single(WorkspaceId::new("ws-allow"), steward).expect("workspace validates"),
@@ -88,7 +88,7 @@ async fn denied_proposal_does_not_dispatch() {
         charter_content_hash: "recon-deny".into(),
         behavioral_spec: String::new(),
     };
-    let snap = Snapshot::new(charter, RoleContext::empty());
+    let snap = Snapshot::new(charter, RoleContext::empty(), Vec::new());
     let steward = make_steward("sut", snap, registry);
     let ws = Arc::new(
         Workspace::single(WorkspaceId::new("ws-deny"), steward).expect("workspace validates"),
@@ -136,7 +136,7 @@ async fn capability_denial_does_not_dispatch_or_produce_verdicts() {
         charter_content_hash: "recon-cap".into(),
         behavioral_spec: String::new(),
     };
-    let snap = Snapshot::new(charter, RoleContext::empty());
+    let snap = Snapshot::new(charter, RoleContext::empty(), Vec::new());
     let steward = make_steward("sut", snap, registry);
     let ws = Arc::new(
         Workspace::single(WorkspaceId::new("ws-cap"), steward).expect("workspace validates"),
@@ -192,7 +192,7 @@ async fn refinement_sequence_dispatches_only_accepted_proposal() {
         charter_content_hash: "recon-refine".into(),
         behavioral_spec: String::new(),
     };
-    let snap = Snapshot::new(charter, RoleContext::empty());
+    let snap = Snapshot::new(charter, RoleContext::empty(), Vec::new());
     let steward = make_steward("sut", snap, registry);
     let ws = Arc::new(
         Workspace::single(WorkspaceId::new("ws-refine"), steward).expect("workspace validates"),

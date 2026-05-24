@@ -78,6 +78,7 @@ impl Steward {
         assemble_actor_system_prompt(
             &self.snapshot.charter,
             &self.snapshot.role_context,
+            &self.snapshot.skills,
             self.governance_mode,
         )
     }

@@ -16,10 +16,14 @@ pub mod artifact;
 pub mod exec;
 pub mod fs;
 pub mod paths;
+pub mod persistence;
 pub mod registry;
+pub mod snapshot_store;
 
-pub use artifact::{FilesystemFindingsBackend, FilesystemTextBackend};
+pub use artifact::{FilesystemRecordStore, FilesystemTextBackend};
 pub use exec::NativeExec;
 pub use fs::{NativeFsRead, NativeFsWrite};
 pub use paths::DeploymentPaths;
+pub use persistence::JsonlSink;
 pub use registry::{ExecutorBuildError, ExecutorRegistry};
+pub use snapshot_store::{SnapshotManifest, persist as persist_snapshot, prune as prune_snapshots};

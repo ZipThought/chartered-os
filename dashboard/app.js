@@ -871,8 +871,6 @@ function CharterSource() {
       <pre>${() => charter()?.behavioral_spec ?? ""}</pre>
       <h2>Frames</h2>
       <pre>${() => JSON.stringify(charter()?.frames ?? [], null, 2)}</pre>
-      <h2>Reviewers</h2>
-      <pre>${() => JSON.stringify(charter()?.reviewers ?? [], null, 2)}</pre>
       <h2>Actions</h2>
       <pre>${() => JSON.stringify(charter()?.actions ?? [], null, 2)}</pre>
     </div>

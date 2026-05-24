@@ -2,6 +2,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use async_trait::async_trait;
 use serde::{Serialize, Serializer};
 use sha2::{Digest, Sha256};
 
@@ -138,8 +139,9 @@ impl std::error::Error for ReceiptStoreError {}
 /// Stewards' Receipts. Cross-Steward queries (when a Charter declares
 /// they're needed) are an explicit opt-in; the default scoping is
 /// per-Steward.
+#[async_trait]
 pub trait ReceiptStore: Send + Sync {
-    fn append(&self, receipt: &Receipt) -> Result<(), ReceiptStoreError>;
+    async fn append(&self, receipt: &Receipt) -> Result<(), ReceiptStoreError>;
     fn query(
         &self,
         context_id: &str,
@@ -193,8 +195,9 @@ impl Default for InMemoryReceiptStore {
     }
 }
 
+#[async_trait]
 impl ReceiptStore for InMemoryReceiptStore {
-    fn append(&self, receipt: &Receipt) -> Result<(), ReceiptStoreError> {
+    async fn append(&self, receipt: &Receipt) -> Result<(), ReceiptStoreError> {
         self.receipts.lock().unwrap().push(receipt.clone());
         Ok(())
     }

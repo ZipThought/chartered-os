@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use crate::cognition::{CognitionBackend, CognitionRequest, CognitionResponse, Message, ToolCallHint};
+use crate::cognition::{ActionHint, CognitionBackend, CognitionRequest, CognitionResponse, Message};
 use crate::receipt::RefinementSignal;
 use crate::tool::{ToolCall, ToolId, ToolParams, ToolResult};
 
@@ -10,16 +10,16 @@ use crate::tool::{ToolCall, ToolId, ToolParams, ToolResult};
 /// Tool call; Halt signals the Task is complete.
 ///
 /// `Fail` is the structural failure signal: the Actor's cognition could
-/// not produce a valid Action (parse error, backend error, malformed
-/// output). The LoopRunner emits a Receipt with `intercept_complete=false`
-/// and Outcome::Escalated so the operator sees the failure in the
-/// Receipt trail. CHECKLIST §Risk Register > Silent Failure: every
-/// partial-coverage condition (cognitive failure prevents the Steward's
-/// output from reaching the Gate) flips `intercept_complete=false`;
-/// silent halt would leave operators unable to distinguish "task
-/// complete" from "Actor failed." The LoopRunner sources the
-/// identifiers (workspace_id, actor.id) when it forges the failure
-/// Receipt — the Actor only contributes the reason.
+/// not produce a valid Action (the adapter never delivered an action_hint
+/// within the inner step budget). The LoopRunner emits a Receipt with
+/// `intercept_complete=false` and Outcome::Escalated so the operator
+/// sees the failure in the Receipt trail. CHECKLIST §Risk Register >
+/// Silent Failure: every partial-coverage condition (cognitive failure
+/// prevents the Steward's output from reaching the Gate) flips
+/// `intercept_complete=false`; silent halt would leave operators unable
+/// to distinguish "task complete" from "Actor failed." The LoopRunner
+/// sources the identifiers (workspace_id, actor.id) when it forges the
+/// failure Receipt — the Actor only contributes the reason.
 #[derive(Debug, Clone)]
 pub enum Action {
     Propose(ToolCall),
@@ -43,20 +43,15 @@ pub trait Actor: Send + Sync {
     async fn step(&mut self, observation: Option<Observation>) -> Action;
 }
 
-/// The canonical Actor implementation: maintains a per-turn
-/// conversation history with the CognitionBackend, parses the LLM's
-/// canonical response into an Action.
-///
-/// Two response shapes the Actor consumes from the backend:
-///   1. `tool_call_hint` is set — the adapter has already extracted
-///      `(tool, params)` from a structured tool-use wire format
-///      (gpt-oss harmony, OpenAI native tool_calls, etc.). The Actor
-///      builds a `ToolCall` from the hint without re-parsing `text`.
-///   2. `tool_call_hint` is `None` — the Actor parses `text` as JSON:
-///      `{"tool":"<id>", "params":{...}}` → `Action::Propose`,
-///      `{"halt": true}` → `Action::Halt`. Anything else →
-///      `Action::Fail` (operator-visible, recorded in trail with
-///      `intercept_complete=false`, never silent).
+/// The canonical Actor implementation. Maintains a per-turn
+/// conversation history with the CognitionBackend; commits on the
+/// strong-typed `action_hint` the adapter produces. The kernel does
+/// not parse JSON — the adapter converts whatever wire shape the
+/// vendor used (harmony envelope, plain prose with embedded JSON,
+/// OpenAI native `tool_calls`, Gemini `functionCall`, etc.) into an
+/// `ActionHint`. When the response has no `action_hint`, the Actor
+/// treats it as a reasoning step and continues the inner loop until
+/// either an action commits or the step budget exhausts.
 pub struct LlmActor {
     id: String,
     backend: Arc<dyn CognitionBackend>,
@@ -64,7 +59,14 @@ pub struct LlmActor {
     history: Vec<Message>,
     context_id: Arc<str>,
     source_id: Arc<str>,
+    inner_step_budget: usize,
 }
+
+/// Default ceiling on LLM calls inside one `Actor::step` invocation.
+/// Each pure-reasoning response burns one step; structured (tool-call
+/// or halt) responses commit immediately. Exhaustion → `Action::Fail`
+/// with operator-visible diagnostic.
+pub const DEFAULT_INNER_STEP_BUDGET: usize = 8;
 
 impl LlmActor {
     pub fn new(
@@ -82,11 +84,22 @@ impl LlmActor {
             history: Vec::new(),
             context_id: context_id.into(),
             source_id,
+            inner_step_budget: DEFAULT_INNER_STEP_BUDGET,
         }
     }
 
     pub fn with_initial_user_message(mut self, msg: impl Into<String>) -> Self {
         self.history.push(Message::user(msg));
+        self
+    }
+
+    /// Cap the LLM calls inside one outer step. The Actor's
+    /// agentic inner loop walks up to `budget` LLM exchanges before
+    /// returning `Action::Fail`. Spec §The Loop and §Cognition Layer:
+    /// every externally-observable tool call still crosses the Gate;
+    /// the inner loop is bounded planning, not bounded effect.
+    pub fn with_inner_step_budget(mut self, budget: usize) -> Self {
+        self.inner_step_budget = budget;
         self
     }
 
@@ -115,25 +128,15 @@ impl LlmActor {
         }
     }
 
-    fn action_from_hint(&self, hint: ToolCallHint) -> Action {
-        Action::Propose(ToolCall {
-            tool: ToolId::new(hint.tool),
-            params: ToolParams(hint.params),
-            context_id: self.context_id.clone(),
-            source_id: self.source_id.clone(),
-        })
-    }
-
-    fn action_from_text(&self, text: &str) -> Action {
-        match parse_canonical_action(text) {
-            ParsedAction::Propose { tool, params } => Action::Propose(ToolCall {
+    fn action_from_hint(&self, hint: ActionHint) -> Action {
+        match hint {
+            ActionHint::Halt => Action::Halt,
+            ActionHint::Propose { tool, params } => Action::Propose(ToolCall {
                 tool: ToolId::new(tool),
                 params: ToolParams(params),
                 context_id: self.context_id.clone(),
                 source_id: self.source_id.clone(),
             }),
-            ParsedAction::Halt => Action::Halt,
-            ParsedAction::Unparseable(reason) => self.fail(reason),
         }
     }
 }
@@ -149,113 +152,132 @@ impl Actor for LlmActor {
             self.append_observation(obs);
         }
 
-        let mut messages = Vec::with_capacity(self.history.len() + 1);
-        messages.push(Message::system(self.system_prompt.clone()));
-        messages.extend(self.history.iter().cloned());
+        // Agentic inner loop. Each iteration either commits (action_hint
+        // present → returned to the outer LoopRunner, which crosses the
+        // Gate) or treats the response as reasoning and continues.
+        // Bounded by `inner_step_budget` so a non-committing model can't
+        // spin indefinitely.
+        for _ in 0..self.inner_step_budget {
+            let mut messages = Vec::with_capacity(self.history.len() + 1);
+            messages.push(Message::system(self.system_prompt.clone()));
+            messages.extend(self.history.iter().cloned());
 
-        let request = CognitionRequest {
-            messages,
-            max_output_tokens: Some(1024),
-        };
-        let response: CognitionResponse = match self.backend.complete(&request).await {
-            Ok(r) => r,
-            Err(e) => return self.fail(format!("backend error: {e}")),
-        };
+            let request = CognitionRequest {
+                messages,
+                max_output_tokens: Some(1024),
+            };
+            let response: CognitionResponse = match self.backend.complete(&request).await {
+                Ok(r) => r,
+                Err(e) => return self.fail(format!("backend error: {e}")),
+            };
 
-        self.history.push(Message::assistant(response.text.clone()));
-        if let Some(hint) = response.tool_call_hint {
-            return self.action_from_hint(hint);
+            self.history.push(Message::assistant(response.content.clone()));
+            if let Some(hint) = response.action_hint {
+                return self.action_from_hint(hint);
+            }
+            // No action_hint → adapter classified the response as pure
+            // reasoning. Keep it in history (already pushed above) and
+            // continue the inner loop.
         }
-        self.action_from_text(&response.text)
+        self.fail(format!(
+            "inner step budget exhausted ({} steps) without the adapter producing an action_hint",
+            self.inner_step_budget
+        ))
     }
-}
-
-#[derive(Debug)]
-enum ParsedAction {
-    Propose {
-        tool: String,
-        params: serde_json::Value,
-    },
-    Halt,
-    Unparseable(String),
-}
-
-/// Parse the canonical Actor response: a JSON object of shape
-/// `{"tool": "...", "params": {...}}` or `{"halt": true}`.
-/// Adapters strip vendor envelopes (markdown fences, harmony, etc.)
-/// and populate `tool_call_hint` for tool-use formats; this parser
-/// only sees canonical JSON text.
-fn parse_canonical_action(text: &str) -> ParsedAction {
-    let value: serde_json::Value = match serde_json::from_str(text.trim()) {
-        Ok(v) => v,
-        Err(e) => {
-            return ParsedAction::Unparseable(format!(
-                "response is not a JSON object: {e}"
-            ));
-        }
-    };
-    if value.get("halt").and_then(serde_json::Value::as_bool) == Some(true) {
-        return ParsedAction::Halt;
-    }
-    let tool = match value.get("tool").and_then(serde_json::Value::as_str) {
-        Some(t) => t.to_string(),
-        None => {
-            return ParsedAction::Unparseable(
-                "response JSON has no `tool` field and no `halt: true`".into(),
-            );
-        }
-    };
-    let params = value
-        .get("params")
-        .cloned()
-        .unwrap_or(serde_json::Value::Null);
-    ParsedAction::Propose { tool, params }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cognition::FakeCognitionBackend;
 
-    #[test]
-    fn parses_raw_json_propose() {
-        match parse_canonical_action(r#"{"tool":"write_file","params":{"path":"x"}}"#) {
-            ParsedAction::Propose { tool, .. } => assert_eq!(tool, "write_file"),
-            other => panic!("expected Propose, got {other:?}"),
+    fn propose(tool: &str, params: serde_json::Value) -> ActionHint {
+        ActionHint::Propose {
+            tool: tool.to_string(),
+            params,
         }
     }
 
-    #[test]
-    fn parses_raw_json_halt() {
-        match parse_canonical_action(r#"{"halt": true}"#) {
-            ParsedAction::Halt => {}
-            other => panic!("expected Halt, got {other:?}"),
-        }
-    }
+    #[tokio::test]
+    async fn commits_on_first_action_hint() {
+        let backend = Arc::new(FakeCognitionBackend::new("a1"));
+        backend.enqueue_action(propose(
+            "write_file",
+            serde_json::json!({"path": "out.md"}),
+        ));
+        let mut actor = LlmActor::new("a", backend, "sys", "ctx");
 
-    #[test]
-    fn unparseable_garbage_is_reported() {
-        match parse_canonical_action("just some prose with no json") {
-            ParsedAction::Unparseable(_) => {}
-            other => panic!("expected Unparseable, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn propose_with_no_params_field_yields_null_params() {
-        match parse_canonical_action(r#"{"tool":"halt_check"}"#) {
-            ParsedAction::Propose { tool, params } => {
-                assert_eq!(tool, "halt_check");
-                assert_eq!(params, serde_json::Value::Null);
+        match actor.step(None).await {
+            Action::Propose(tc) => {
+                assert_eq!(tc.tool.0, "write_file");
+                assert_eq!(tc.params.0["path"].as_str(), Some("out.md"));
             }
             other => panic!("expected Propose, got {other:?}"),
         }
     }
 
-    #[test]
-    fn missing_tool_and_no_halt_is_unparseable() {
-        match parse_canonical_action(r#"{"params":{"x":1}}"#) {
-            ParsedAction::Unparseable(_) => {}
-            other => panic!("expected Unparseable, got {other:?}"),
+    #[tokio::test]
+    async fn returns_halt_on_halt_action_hint() {
+        let backend = Arc::new(FakeCognitionBackend::new("a2"));
+        backend.enqueue_action(ActionHint::Halt);
+        let mut actor = LlmActor::new("a", backend, "sys", "ctx");
+        match actor.step(None).await {
+            Action::Halt => {}
+            other => panic!("expected Halt, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn reasoning_responses_continue_inner_loop_until_commit() {
+        let backend = Arc::new(FakeCognitionBackend::new("a3"));
+        backend
+            .enqueue("First I reason about the request.")
+            .enqueue("Now I plan: I'll write the file.")
+            .enqueue_action(propose(
+                "write_file",
+                serde_json::json!({"path": "out.md"}),
+            ));
+        let mut actor = LlmActor::new("a", backend, "sys", "ctx");
+
+        match actor.step(None).await {
+            Action::Propose(tc) => {
+                assert_eq!(tc.tool.0, "write_file");
+                assert_eq!(tc.params.0["path"].as_str(), Some("out.md"));
+            }
+            other => panic!("expected Propose after reasoning, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn budget_exhaustion_fails_with_diagnostic() {
+        let backend = Arc::new(FakeCognitionBackend::new("a4"));
+        for _ in 0..DEFAULT_INNER_STEP_BUDGET {
+            backend.enqueue("more reasoning, no commit");
+        }
+        let mut actor = LlmActor::new("a", backend, "sys", "ctx");
+
+        match actor.step(None).await {
+            Action::Fail { reason } => {
+                assert!(
+                    reason.contains("inner step budget exhausted"),
+                    "reason: {reason}"
+                );
+            }
+            other => panic!("expected Fail, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn custom_budget_is_respected() {
+        let backend = Arc::new(FakeCognitionBackend::new("a5"));
+        backend.enqueue("just reasoning"); // one response only
+        let mut actor =
+            LlmActor::new("a", backend, "sys", "ctx").with_inner_step_budget(1);
+        match actor.step(None).await {
+            Action::Fail { reason } => {
+                assert!(reason.contains("inner step budget exhausted (1 steps)"));
+            }
+            other => panic!("expected Fail with budget=1, got {other:?}"),
         }
     }
 }

@@ -1,5 +1,5 @@
 # Charter: coding-agent
-# Spec §Reference Charters; loaded by core::charter_loader::load_charter_def.
+# Spec §Reference Charters; loaded by runtime::charter_loader::load_charter_def.
 
 permitted_tools = ["read_file", "write_file", "exec_command"]
 

@@ -1,25 +1,33 @@
-//! Load Charter and Role context from filesystem artifacts. Spec
-//! §The Charter, §Role Context, §Reference Charters.
+//! Charter and Role context parsing — pure data shapes, no IO.
 //!
-//! Inputs:
-//! - `<charter_dir>/frames.toml` — `permitted_tools` + `[[frames]]`
-//!   tables with `id`, `concern`, `applies_to_tools`, typed
-//!   `declared_scopes`, optional `prior_receipt_queries`.
-//! - `<charter_dir>/scopes.md` — Charter Scopes; `## Heading` lines
-//!   become scope names via slugify (lowercase, non-alphanumeric runs
-//!   collapsed to `_`); content between headings becomes scope text.
-//! - `<deployment>/role_context.md` — Role context Scopes; same
-//!   markdown format as scopes.md but parsed by `load_role_context_def`
-//!   into `RoleContextDef`.
+//! Spec §The Charter, §Role Context, §Reference Charters.
 //!
-//! Two-stage construction: parser → `CharterDef`/`RoleContextDef`
+//! The kernel parses already-loaded text into the data shapes
+//! `CharterDef` / `RoleContextDef`; deployment-side IO (reading
+//! `frames.toml`, `scopes.md`, `behavioral_spec.md`, `role_context.md`,
+//! `skills/*.md` from disk or any other substrate) lives outside the
+//! kernel. The kernel has no `std::fs` dependency; substrate choice is
+//! a deployment concern.
+//!
+//! Input shapes:
+//! - `frames.toml` text — `permitted_tools` + `[[frames]]` tables with
+//!   `id`, `concern`, `applies_to_tools`, typed `declared_scopes`,
+//!   optional `prior_receipt_queries`.
+//! - `scopes.md` text — Charter Scopes; `## Heading` lines become scope
+//!   names via slugify (lowercase, non-alphanumeric runs collapsed to
+//!   `_`); content between headings becomes scope text.
+//! - `behavioral_spec.md` text — conduct prose composed verbatim into
+//!   the Actor's system prompt.
+//! - `role_context.md` text — Role context Scopes (same markdown format
+//!   as `scopes.md`).
+//!
+//! Two-stage construction: pure parser → `CharterDef`/`RoleContextDef`
 //! (data only, no Evaluator instances), then `build_charter` /
-//! `build_role_context` materialize the runtime Charter/RoleContext
-//! by attaching an Evaluator (caller chooses backend) and a version
-//! number (caller supplies from `charter.toml` / `role_context.md`
-//! deployment metadata).
+//! `build_role_context` materialize the runtime Charter/RoleContext by
+//! attaching an Evaluator (caller chooses backend) and a version number
+//! (caller supplies from `charter.toml` / `role_context.md` deployment
+//! metadata).
 
-use std::path::Path;
 use std::sync::Arc;
 
 use serde::Deserialize;
@@ -68,33 +76,27 @@ pub struct RoleContextDef {
     pub role_context_content_hash: String,
 }
 
-/// Load a Charter from a directory containing `frames.toml`,
-/// `scopes.md`, and `behavioral_spec.md`. Returns `CharterDef` (data
+/// Parse a Charter from already-loaded text. Returns `CharterDef` (data
 /// only); use `build_charter` to attach Evaluators.
 ///
-/// `behavioral_spec.md` is the conduct prose the Runtime composes into
-/// the Actor's system prompt. Per spec §The Charter, this lives on the
+/// `source_name` is a substrate-agnostic identifier used only in error
+/// messages (e.g. the file path the caller read from). The parser has
+/// no opinion on where the text came from.
+///
+/// `behavioral_spec` is the conduct prose composed verbatim into the
+/// Actor's system prompt. Per spec §The Charter, this lives on the
 /// Charter (per-Steward), not in deployment-side configuration.
-pub fn load_charter_def(charter_dir: &Path) -> Result<CharterDef, CharterLoadError> {
-    let frames_path = charter_dir.join("frames.toml");
-    let scopes_path = charter_dir.join("scopes.md");
-    let behavioral_spec_path = charter_dir.join("behavioral_spec.md");
-
-    let frames_text = std::fs::read_to_string(&frames_path).map_err(|e| {
-        CharterLoadError(format!("reading {}: {e}", frames_path.display()))
-    })?;
-    let scopes_text = std::fs::read_to_string(&scopes_path).map_err(|e| {
-        CharterLoadError(format!("reading {}: {e}", scopes_path.display()))
-    })?;
-    let behavioral_spec = std::fs::read_to_string(&behavioral_spec_path).map_err(|e| {
-        CharterLoadError(format!("reading {}: {e}", behavioral_spec_path.display()))
+pub fn parse_charter_def(
+    frames_toml: &str,
+    scopes_md: &str,
+    behavioral_spec: &str,
+    source_name: &str,
+) -> Result<CharterDef, CharterLoadError> {
+    let doc: FramesDocToml = toml::from_str(frames_toml).map_err(|e| {
+        CharterLoadError(format!("parsing {source_name}: {e}"))
     })?;
 
-    let doc: FramesDocToml = toml::from_str(&frames_text).map_err(|e| {
-        CharterLoadError(format!("parsing {}: {e}", frames_path.display()))
-    })?;
-
-    let charter_scopes = parse_named_sections(&scopes_text);
+    let charter_scopes = parse_named_sections(scopes_md);
 
     let mut frames = Vec::with_capacity(doc.frames.len());
     for ft in doc.frames {
@@ -105,9 +107,8 @@ pub fn load_charter_def(charter_dir: &Path) -> Result<CharterDef, CharterLoadErr
                 "RoleContext" => ScopeKind::RoleContext,
                 other => {
                     return Err(CharterLoadError(format!(
-                        "unknown ScopeKind `{other}` in frame `{}` of {}",
-                        ft.id,
-                        frames_path.display()
+                        "unknown ScopeKind `{other}` in frame `{}` of {source_name}",
+                        ft.id
                     )));
                 }
             };
@@ -130,9 +131,9 @@ pub fn load_charter_def(charter_dir: &Path) -> Result<CharterDef, CharterLoadErr
     }
 
     let mut hasher = Sha256::new();
-    hasher.update(frames_text.as_bytes());
+    hasher.update(frames_toml.as_bytes());
     hasher.update(b":");
-    hasher.update(scopes_text.as_bytes());
+    hasher.update(scopes_md.as_bytes());
     hasher.update(b":");
     hasher.update(behavioral_spec.as_bytes());
     let charter_content_hash = hex::encode(hasher.finalize());
@@ -140,7 +141,7 @@ pub fn load_charter_def(charter_dir: &Path) -> Result<CharterDef, CharterLoadErr
     Ok(CharterDef {
         permitted_tools: doc.permitted_tools.into_iter().map(ToolId::new).collect(),
         charter_scopes,
-        behavioral_spec,
+        behavioral_spec: behavioral_spec.to_string(),
         frames,
         charter_content_hash,
     })
@@ -180,19 +181,17 @@ where
     }
 }
 
-/// Load Role context from a markdown file using the same `## Heading`
-/// → slugified-name + content convention as `scopes.md`.
-pub fn load_role_context_def(path: &Path) -> Result<RoleContextDef, CharterLoadError> {
-    let text = std::fs::read_to_string(path)
-        .map_err(|e| CharterLoadError(format!("reading {}: {e}", path.display())))?;
-    let scopes = parse_named_sections(&text);
+/// Parse Role context from already-loaded markdown text using the same
+/// `## Heading` → slugified-name + content convention as `scopes.md`.
+pub fn parse_role_context_def(text: &str) -> RoleContextDef {
+    let scopes = parse_named_sections(text);
     let mut hasher = Sha256::new();
     hasher.update(text.as_bytes());
     let role_context_content_hash = hex::encode(hasher.finalize());
-    Ok(RoleContextDef {
+    RoleContextDef {
         scopes,
         role_context_content_hash,
-    })
+    }
 }
 
 pub fn build_role_context(def: RoleContextDef, role_context_version: u64) -> RoleContext {

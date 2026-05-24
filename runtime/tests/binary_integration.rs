@@ -1,4 +1,9 @@
-//! End-to-end tests against the chartered-runtime binary.
+//! Binary-level integration tests against the chartered-runtime binary
+//! with `FakeCognitionBackend` standing in for the LLM (`backend =
+//! "fake"` in the steward.toml fixtures). Integration per `AGENTS.md
+//! §Verification`: a vertical cut across the binary boundary using the
+//! fake-LLM side of the test pair; the real-LLM side is in
+//! `runtime/tests/llm_e2e.rs` and runs only locally.
 //!
 //! Each test constructs a complete `.chartered/` deployment in an
 //! isolated tempdir, runs the binary, and asserts on:
@@ -7,9 +12,9 @@
 //!
 //! The deployments are real production deployments — same loader,
 //! same runtime path, same OS-touching dispatch tools. The only
-//! distinction from a real-LLM deployment is the `backend = "fake"`
-//! values in steward.toml, which select FakeCognitionBackend per
-//! role with inline canned responses. ZERO test-only code paths.
+//! distinction from the e2e LLM deployments is `backend = "fake"` in
+//! steward.toml, which selects FakeCognitionBackend per role with
+//! inline canned responses. ZERO test-only code paths.
 //!
 //! Tempdirs are system temp (outside the repo, naturally gitignored).
 //! Each test gets its own tempdir for isolation.
@@ -53,12 +58,6 @@ fn write_artifact_tools(dep: &TestDeployment) {
         "modify_artifact",
         "native_artifact_modify",
         "modify_artifact",
-    );
-    write_tool(
-        dep,
-        "record_finding",
-        "native_artifact_record_finding",
-        "record_finding",
     );
     write_tool(
         dep,
@@ -133,7 +132,7 @@ fn e2e_selection_refine_modifies_artifact_after_allowed_receipt() {
     let steward = format!(
         r#"
 system_prompt = "test"
-tool_registry = ["modify_artifact.toml", "record_finding.toml", "read_artifact.toml", "list_artifacts.toml"]
+tool_registry = ["modify_artifact.toml", "read_artifact.toml", "list_artifacts.toml"]
 
 [actor]
 backend = "fake"
@@ -200,7 +199,7 @@ fn e2e_selection_reject_refine_allow_changes_only_allowed_text() {
     let steward = format!(
         r#"
 system_prompt = "test"
-tool_registry = ["modify_artifact.toml", "record_finding.toml", "read_artifact.toml", "list_artifacts.toml"]
+tool_registry = ["modify_artifact.toml", "read_artifact.toml", "list_artifacts.toml"]
 
 [actor]
 backend = "fake"
@@ -243,27 +242,33 @@ fn e2e_selection_review_records_finding_without_mutating_artifact() {
     let dep = TestDeployment::new();
     dep.write_chartered_toml();
     dep.write_charter_ref(1);
-    dep.write_charter(&frames_allow_all(&["record_finding"]), SCOPES_MD_EMPTY);
+    dep.write_charter(&frames_allow_all(&["modify_artifact"]), SCOPES_MD_EMPTY);
     dep.write_role_context_md();
     write_artifact_tools(&dep);
     let original = "shared cache without tenant isolation";
     std::fs::write(dep.workspace_file("architecture.md"), original).unwrap();
 
     let proposal = serde_json::json!({
-        "tool": "record_finding",
+        "tool": "modify_artifact",
         "params": {
-            "artifact_id": "architecture.md",
-            "range": { "start": 0, "end": 37, "start_line": 1, "end_line": 1 },
-            "concern": "Tenant isolation",
-            "severity": "high",
-            "detail": "Shared cache lacks tenant keying"
+            "kind": "record-store",
+            "artifact_id": "records",
+            "edit": {
+                "append": {
+                    "artifact_id": "architecture.md",
+                    "range": { "start": 0, "end": 37, "start_line": 1, "end_line": 1 },
+                    "concern": "Tenant isolation",
+                    "severity": "high",
+                    "detail": "Shared cache lacks tenant keying"
+                }
+            }
         }
     });
     let halt = serde_json::json!({"halt": true});
     let steward = format!(
         r#"
 system_prompt = "test"
-tool_registry = ["modify_artifact.toml", "record_finding.toml", "read_artifact.toml", "list_artifacts.toml"]
+tool_registry = ["modify_artifact.toml", "read_artifact.toml", "list_artifacts.toml"]
 
 [actor]
 backend = "fake"
@@ -294,21 +299,24 @@ always_allow = ["ALLOW: ok"]
     assert_eq!(receipts[0]["outcome"].as_str(), Some("Allowed"));
     assert_eq!(
         receipts[0]["tool_call"]["tool"].as_str(),
-        Some("record_finding")
+        Some("modify_artifact")
+    );
+    assert_eq!(
+        receipts[0]["tool_call"]["params"]["kind"].as_str(),
+        Some("record-store")
     );
     assert_eq!(receipts[1]["tool_call"]["tool"].as_str(), Some("<halt>"));
     assert_eq!(
         std::fs::read_to_string(dep.workspace_file("architecture.md")).unwrap(),
         original
     );
-    let findings =
-        std::fs::read_to_string(dep.workspace_file(".chartered/findings.jsonl")).unwrap();
-    let finding: serde_json::Value = serde_json::from_str(findings.trim()).unwrap();
-    assert_eq!(finding["task_id"], receipts[0]["task_id"]);
-    assert_eq!(finding["author_steward_id"], "sut");
-    assert!(finding.get("frame_id").is_none());
-    assert_eq!(finding["artifact_id"], "architecture.md");
-    assert_eq!(finding["admitting_receipt_id"], receipts[0]["receipt_id"]);
+    let records =
+        std::fs::read_to_string(dep.workspace_file(".chartered/records.jsonl")).unwrap();
+    let record: serde_json::Value = serde_json::from_str(records.trim()).unwrap();
+    assert_eq!(record["task_id"], receipts[0]["task_id"]);
+    assert_eq!(record["steward_id"], "sut");
+    assert_eq!(record["artifact_id"], "architecture.md");
+    assert_eq!(record["receipt_id"], receipts[0]["receipt_id"]);
 }
 
 /// Happy path: Actor proposes write_file → Frame ALLOW → file written →
@@ -1228,13 +1236,13 @@ always_allow = ["ALLOW: ok"]
         "actor's first user message should carry the --user-message"
     );
     assert!(
-        actor_first["response"]["text"]
+        actor_first["response"]["content"]
             .as_str()
             .unwrap()
             .contains("write_file")
     );
     assert_eq!(
-        eval_calls[0]["response"]["text"].as_str(),
+        eval_calls[0]["response"]["content"].as_str(),
         Some("ALLOW: ok")
     );
 }

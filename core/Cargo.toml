@@ -16,3 +16,4 @@ toml = "0.8"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "time", "sync", "test-util"] }
+tempfile = "3"

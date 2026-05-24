@@ -178,7 +178,7 @@ async fn prior_receipt_queries_do_not_leak_across_stewards() {
         charter_content_hash: "char-b".into(),
         behavioral_spec: String::new(),
     };
-    let snap_b = Snapshot::new(charter_b, RoleContext::empty());
+    let snap_b = Snapshot::new(charter_b, RoleContext::empty(), Vec::new());
     let mut reg_b = ToolRegistry::new();
     reg_b.register(Arc::new(NopTool::new("tool-y")));
     let steward_b = Steward::new(StewardId::new("steward-b"), snap_b, Arc::new(reg_b));

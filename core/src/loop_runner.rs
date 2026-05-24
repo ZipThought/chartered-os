@@ -150,7 +150,8 @@ impl LoopRunner {
                             params: serde_json::json!({}),
                             intercept_complete: true,
                         },
-                    );
+                    )
+                    .await;
                     task.status = TaskStatus::Halted;
                     return LoopOutcome::Halted {
                         task,
@@ -173,7 +174,8 @@ impl LoopRunner {
                             params: serde_json::json!({ "reason": reason }),
                             intercept_complete: false,
                         },
-                    );
+                    )
+                    .await;
                     task.status = TaskStatus::Escalated;
                     return LoopOutcome::Escalated {
                         task,
@@ -192,7 +194,7 @@ impl LoopRunner {
                     let signal = receipt.refinement_signal();
                     let receipt_id = receipt.receipt_id.clone();
 
-                    if let Err(e) = self.workspace.receipt_store.append(&receipt) {
+                    if let Err(e) = self.workspace.receipt_store.append(&receipt).await {
                         receipt.outcome = Outcome::Escalated;
                         receipt.intercept_complete = false;
                         let _ = e;
@@ -267,7 +269,8 @@ impl LoopRunner {
                                         }),
                                         intercept_complete: true,
                                     },
-                                );
+                                )
+                                .await;
                                 task.status = TaskStatus::Escalated;
                                 return LoopOutcome::Escalated {
                                     task,
@@ -294,11 +297,11 @@ impl LoopRunner {
     /// Append a kernel-emitted Receipt (Halt, Fail, BudgetExhausted) to
     /// both the durable store and the in-memory trail. The same Receipt
     /// crosses both surfaces — never mutate one and not the other.
-    fn append_kernel_event(
+    async fn append_kernel_event(
         &self,
         trail: &mut Vec<Receipt>,
         task_id: &TaskId,
-        event: KernelEvent,
+        event: KernelEvent<'_>,
     ) {
         let snapshot = &self.steward.snapshot;
         let receipt = Receipt {
@@ -321,7 +324,7 @@ impl LoopRunner {
             role_context_version: snapshot.role_context.role_context_version,
             snapshot_id: snapshot.id.clone(),
         };
-        if let Err(_e) = self.workspace.receipt_store.append(&receipt) {
+        if let Err(_e) = self.workspace.receipt_store.append(&receipt).await {
             // The kernel event still reaches the caller's in-memory
             // trail below; failure visibility is represented by the
             // event's intercept_complete flag chosen by the caller.

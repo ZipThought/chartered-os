@@ -27,8 +27,11 @@ use chartered_dispatch::ExecutorRegistry;
 use serde::Serialize;
 
 use crate::config::{self, BackendKind, TesterConfig};
+use crate::gemini_backend::GeminiBackendFactory;
 use crate::openai_backend::OpenAiBackendFactory;
-use crate::persistence::{self, AppendOnlyFileReceiptStore, JsonlSink, LoggingBackend};
+use chartered_dispatch::JsonlSink;
+
+use crate::persistence::{self, AppendOnlyFileReceiptStore, LoggingBackend};
 
 #[derive(Debug, Default)]
 pub struct Options {
@@ -110,10 +113,12 @@ pub async fn run(opts: Options) -> Result<(), Box<dyn std::error::Error>> {
 
     let receipt_store: Arc<dyn ReceiptStore> = Arc::new(
         AppendOnlyFileReceiptStore::create(&receipts_path)
+            .await
             .map_err(|e| RunError(format!("opening {}: {e}", receipts_path.display())))?,
     );
     let cognition_log: Arc<JsonlSink> = Arc::new(
         JsonlSink::create(&cognition_path)
+            .await
             .map_err(|e| RunError(format!("opening {}: {e}", cognition_path.display())))?,
     );
 
@@ -128,9 +133,11 @@ pub async fn run(opts: Options) -> Result<(), Box<dyn std::error::Error>> {
     // across all OpenAI-backed roles. Constructed lazily — fake-only
     // deployments never read env or build an HTTP client.
     let openai_factory = build_openai_factory_if_needed(&cfg)?;
+    let gemini_factory = build_gemini_factory_if_needed(&cfg)?;
     let backends = BackendCtx {
         log: cognition_log.clone(),
         openai: openai_factory.as_ref(),
+        gemini: gemini_factory.as_ref(),
     };
 
     let actor_backend = build_backend(
@@ -192,8 +199,21 @@ pub async fn run(opts: Options) -> Result<(), Box<dyn std::error::Error>> {
     // (which `build_charter` moves). Single source of truth, injected
     // into the executor registry and from there into every Backend.
     let chartered_dir_for_paths = cfg.chartered_dir.clone();
-    let (charter, role_context) = cfg.build_charter(evaluator_factory);
-    let snapshot = Snapshot::new(charter, role_context);
+    let (charter, role_context, skills) = cfg.build_charter(evaluator_factory);
+    let snapshot = Snapshot::new(charter, role_context, skills);
+
+    // Spec §Snapshot Lifecycle: persist on creation so the Snapshot ID
+    // embedded in every Receipt resolves to a record on disk.
+    let snapshots_dir = chartered_dir_for_paths.join("snapshots");
+    chartered_dispatch::persist_snapshot(&snapshot, &snapshots_dir)
+        .await
+        .map_err(|e| {
+            RunError(format!(
+                "persist Snapshot {} to {}: {e}",
+                snapshot.id,
+                snapshots_dir.display()
+            ))
+        })?;
 
     let deployment_paths = chartered_dispatch::DeploymentPaths::canonicalize(
         &workspace_root,
@@ -206,7 +226,9 @@ pub async fn run(opts: Options) -> Result<(), Box<dyn std::error::Error>> {
             chartered_dir_for_paths.display(),
         ))
     })?;
-    let executor_registry = ExecutorRegistry::new(deployment_paths);
+    let executor_registry = ExecutorRegistry::new(deployment_paths)
+        .await
+        .map_err(|e| RunError(format!("constructing executor registry: {e}")))?;
     let mut registry = ToolRegistry::new();
     for tr in &tools_for_registry {
         let exec: Arc<dyn ToolExecutor> = executor_registry
@@ -340,20 +362,16 @@ fn selection_message(
     let selected_text =
         read_selection_text(workspace_root, &selection.artifact_id, selection.range)?;
     let action_kind = selection.action.kind.as_wire_str();
-    let required_tool = match selection.action.kind {
-        SelectionActionKind::Generative => "modify_artifact",
-        SelectionActionKind::Evaluative => "record_finding",
-    };
     let response_template = match selection.action.kind {
         SelectionActionKind::Generative => {
             r#"{"tool":"modify_artifact","params":{"kind":"text","artifact_id":"ARTIFACT_ID","range":{"start":START,"end":END,"start_line":START_LINE,"end_line":END_LINE},"replacement":"REPLACEMENT_TEXT","summary":"PROFESSIONAL_SUMMARY"}}"#
         }
         SelectionActionKind::Evaluative => {
-            r#"{"tool":"record_finding","params":{"artifact_id":"ARTIFACT_ID","range":{"start":START,"end":END,"start_line":START_LINE,"end_line":END_LINE},"concern":"CONCERN","severity":"medium","detail":"DETAIL"}}"#
+            r#"{"tool":"modify_artifact","params":{"kind":"record-store","artifact_id":"records","edit":{"append":{"artifact_id":"ARTIFACT_ID","range":{"start":START,"end":END,"start_line":START_LINE,"end_line":END_LINE},"concern":"CONCERN","severity":"medium","detail":"DETAIL"}}}}"#
         }
     };
     Ok(format!(
-        "Selection trigger:\ntrigger_json: {}\naction_name: {}\naction_kind: {}\nartifact_id: {}\nrange: start={}, end={}, start_line={}, end_line={}\nselected_text:\n{}\n\nReturn one raw JSON object and no other text. Propose exactly one `{}` Tool call for this action. Generative actions modify artifacts only through `modify_artifact` with kind=\"text\", artifact_id, range, replacement, and summary. Evaluative actions record findings only through `record_finding` with artifact_id, range, concern, severity, and detail (the Tool resolves the findings store internally).\nJSON shape:\n{}",
+        "Selection trigger:\ntrigger_json: {}\naction_name: {}\naction_kind: {}\nartifact_id: {}\nrange: start={}, end={}, start_line={}, end_line={}\nselected_text:\n{}\n\nReturn one raw JSON object and no other text. Propose exactly one `modify_artifact` Tool call for this action. Generative actions use `kind=\"text\"` with artifact_id, range, replacement, and summary. Evaluative actions use `kind=\"record-store\"` against the `records` artifact, with `edit.append` carrying artifact_id (source), range, concern, severity, and detail.\nJSON shape:\n{}",
         serde_json::to_string(&trigger)
             .map_err(|e| RunError(format!("serialize selection trigger: {e}")))?,
         selection.action.name,
@@ -364,7 +382,6 @@ fn selection_message(
         selection.range.start_line,
         selection.range.end_line,
         selected_text,
-        required_tool,
         response_template,
     ))
 }
@@ -458,6 +475,7 @@ enum FakeCorpus<'a> {
 struct BackendCtx<'a> {
     log: Arc<JsonlSink>,
     openai: Option<&'a OpenAiBackendFactory>,
+    gemini: Option<&'a GeminiBackendFactory>,
 }
 
 /// Single backend-construction helper: matches on `BackendKind`,
@@ -475,6 +493,41 @@ fn build_backend(
     let inner: Arc<dyn CognitionBackend> = match kind {
         BackendKind::Fake => {
             let backend = Arc::new(FakeCognitionBackend::new(id.clone()));
+            // Per role, the runtime canonicalizes TOML `fake_responses`
+            // strings into the strong-typed surface the kernel reads —
+            // the kernel itself performs no text parsing (see
+            // `AGENTS.md §Verification`). TOML strings remain shaped
+            // like real LLM output for operator ergonomics:
+            //   Actor: JSON `{"tool":"...","params":{...}}` → ActionHint.
+            //   Evaluator: `ALLOW: reason` line(s) → Vec<DecisionLine>.
+            //   Judge: JSON `{"score":...,...}` → JudgeOutput.
+            //   Tester: plain user-message text — no strong type needed.
+            let enqueue_role = |b: &FakeCognitionBackend, r: &str| {
+                match role {
+                    BackendRole::Actor => {
+                        let hint = crate::canonicalize::canonicalize_action_hint(r);
+                        b.enqueue_with_action(r.to_string(), hint);
+                    }
+                    BackendRole::Evaluator { .. } => {
+                        let lines = crate::canonicalize::canonicalize_verdict_lines(r);
+                        if lines.is_empty() {
+                            b.enqueue(r);
+                        } else {
+                            b.enqueue_verdict_lines(lines);
+                        }
+                    }
+                    BackendRole::Judge => {
+                        if let Some(out) = crate::canonicalize::canonicalize_judge_output(r) {
+                            b.enqueue_judge_output(out);
+                        } else {
+                            b.enqueue(r);
+                        }
+                    }
+                    BackendRole::Tester => {
+                        b.enqueue(r);
+                    }
+                }
+            };
             match fakes {
                 FakeCorpus::Sequence(rs) => {
                     if rs.is_empty() {
@@ -484,7 +537,7 @@ fn build_backend(
                         )));
                     }
                     for r in rs {
-                        backend.enqueue(r);
+                        enqueue_role(&backend, r);
                     }
                 }
                 FakeCorpus::Single(opt) => {
@@ -494,11 +547,11 @@ fn build_backend(
                             role.label()
                         ))
                     })?;
-                    backend.enqueue(r);
+                    enqueue_role(&backend, r);
                 }
                 FakeCorpus::Optional(rs) => {
                     for r in rs {
-                        backend.enqueue(r);
+                        enqueue_role(&backend, r);
                     }
                 }
             };
@@ -508,7 +561,7 @@ fn build_backend(
             let factory = ctx.openai.ok_or_else(|| {
                 RunError(format!(
                     "{} backend = \"openai\" but OpenAI factory not initialized — \
-                     LLM_BASE_URL must be set in env",
+                     OPEN_AI_BASE_URL must be set in env",
                     role.label()
                 ))
             })?;
@@ -516,6 +569,20 @@ fn build_backend(
                 factory
                     .build(id, model.map(str::to_string))
                     .map_err(|e| RunError(format!("{} openai backend: {e}", role.label())))?,
+            )
+        }
+        BackendKind::Gemini => {
+            let factory = ctx.gemini.ok_or_else(|| {
+                RunError(format!(
+                    "{} backend = \"gemini\" but Gemini factory not initialized — \
+                     GEMINI_API_KEY must be set in env",
+                    role.label()
+                ))
+            })?;
+            Arc::new(
+                factory
+                    .build(id, model.map(str::to_string))
+                    .map_err(|e| RunError(format!("{} gemini backend: {e}", role.label())))?,
             )
         }
     };
@@ -545,6 +612,32 @@ fn build_openai_factory_if_needed(
     OpenAiBackendFactory::from_env()
         .map(Some)
         .map_err(|e| RunError(format!("OpenAI factory: {e}")))
+}
+
+/// Build the shared Gemini factory only when at least one role uses
+/// `backend = "gemini"` — pure fake/openai deployments stay
+/// GEMINI_*-env-free.
+fn build_gemini_factory_if_needed(
+    cfg: &config::DeploymentConfig,
+) -> Result<Option<GeminiBackendFactory>, RunError> {
+    let needs_gemini = cfg.steward.actor.backend == BackendKind::Gemini
+        || cfg.steward.evaluator.backend == BackendKind::Gemini
+        || cfg
+            .steward
+            .tester
+            .as_ref()
+            .is_some_and(|t| t.backend == BackendKind::Gemini)
+        || cfg
+            .steward
+            .judge
+            .as_ref()
+            .is_some_and(|j| j.backend == BackendKind::Gemini);
+    if !needs_gemini {
+        return Ok(None);
+    }
+    GeminiBackendFactory::from_env()
+        .map(Some)
+        .map_err(|e| RunError(format!("Gemini factory: {e}")))
 }
 
 fn build_evaluator_backends_per_frame(

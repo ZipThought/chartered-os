@@ -1,9 +1,9 @@
-permitted_tools = ["modify_artifact", "record_finding", "read_artifact", "list_artifacts"]
+permitted_tools = ["modify_artifact", "read_artifact", "list_artifacts"]
 
 [[frames]]
 id = "citation_grounding"
 concern = "The Tool call's claim is grounded in quoted text from the selected artifact range. Findings cite a substring or an adjacent clause of the selected Section; refinements summarize the substantive change rather than the act of editing."
-applies_to_tools = ["modify_artifact", "record_finding"]
+applies_to_tools = ["modify_artifact"]
 declared_scopes = [
   { name = "citation_grounding", kind = "Charter" },
 ]
@@ -11,7 +11,7 @@ declared_scopes = [
 [[frames]]
 id = "diligence_discipline"
 concern = "Review findings identify a concrete deal-relevant issue (change-of-control trigger, unenforceable covenant, unfavorable indemnity term, stale reference date, overbroad carve-out, asymmetric right). Refine modifications preserve the artifact's professional register and the section's substantive subject."
-applies_to_tools = ["modify_artifact", "record_finding"]
+applies_to_tools = ["modify_artifact"]
 declared_scopes = [
   { name = "diligence_discipline", kind = "Charter" },
 ]
@@ -19,7 +19,7 @@ declared_scopes = [
 [[frames]]
 id = "severity_calibration"
 concern = "Severity reflects deal impact under the calibration in the Charter scope: high for signing-gating issues, medium for negotiation moves, low for cleanup."
-applies_to_tools = ["record_finding"]
+applies_to_tools = ["modify_artifact"]
 declared_scopes = [
   { name = "severity_calibration", kind = "Charter" },
 ]

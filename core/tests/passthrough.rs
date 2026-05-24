@@ -34,7 +34,7 @@ fn snap_with_deny_frame(content_hash: &str) -> Arc<Snapshot> {
         charter_content_hash: content_hash.into(),
         behavioral_spec: String::new(),
     };
-    Snapshot::new(charter, RoleContext::empty())
+    Snapshot::new(charter, RoleContext::empty(), Vec::new())
 }
 
 fn send_proposal() -> serde_json::Value {

@@ -11,27 +11,30 @@ enum Outcome {
   ALLOWED = 1;     // every Frame GROUNDED
   DENIED = 2;      // at least one Frame UNGROUNDED
   ESCALATED = 3;   // refinement budget exhausted
-  PASSTHROUGH = 4; // no evaluation performed (passthrough enforcement)
+  PASSTHROUGH = 4; // no evaluation performed (governance_mode.evaluation = false)
 }
 
-// See docs/SPECIFICATION.md > Requisite Variety for why no intermediate level exists.
-enum EnforcementLevel {
-  ENFORCEMENT_LEVEL_UNSPECIFIED = 0;
-  PASSTHROUGH_LEVEL = 1;
-  FULL_LEVEL = 2;
+// Independent toggles per docs/SPECIFICATION.md > The Runtime > Governance mode.
+// Four named combinations: (true, true) full, (true, false) grounding-only,
+// (false, true) evaluation-only, (false, false) neither. Every Receipt records
+// which mode produced it.
+message GovernanceMode {
+  bool grounding = 1;   // Charter and Role context Scopes injected into the Actor's prompt
+  bool evaluation = 2;  // Frames evaluate proposals before dispatch
 }
 
 message Receipt {
   string receipt_id = 1;
-  ToolCall tool_call = 2;
-  repeated Verdict verdicts = 3;            // one per applicable Frame; empty under PASSTHROUGH
-  Outcome outcome = 4;
-  google.protobuf.Timestamp timestamp = 5;
-  Metrics metrics = 6;
-  EnforcementLevel enforcement_level = 7;
-  bool intercept_complete = 8;              // false on any partial-coverage condition (timeout, evaluator unreachable, durability degraded)
-  string adapter_id = 9;                    // Runtime or Adapter identifier
-  uint64 charter_version = 10;
-  uint64 role_context_version = 11;
-  string snapshot_id = 12;
+  string task_id = 2;
+  string attempt_id = 3;                    // empty for controller events (halt, fail, budget_exhausted)
+  string steward_id = 4;                    // the Steward that emitted this Receipt
+  ToolCall tool_call = 5;
+  repeated Verdict verdicts = 6;            // one per applicable Frame; empty under PASSTHROUGH
+  Outcome outcome = 7;
+  google.protobuf.Timestamp timestamp = 8;
+  bool intercept_complete = 9;              // false on any partial-coverage condition (timeout, evaluator unreachable, durability degraded)
+  GovernanceMode governance_mode = 10;
+  uint64 charter_version = 11;
+  uint64 role_context_version = 12;
+  string snapshot_id = 13;
 }

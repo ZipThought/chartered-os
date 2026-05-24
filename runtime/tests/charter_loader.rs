@@ -9,11 +9,11 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use chartered_core::{
-    build_charter, build_role_context, load_charter_def, load_role_context_def, Evaluator,
-    FrameDef, LlmEvaluator, ScopeKind, Snapshot, Steward, StewardId, ToolExecutor, ToolId,
-    ToolParams, ToolRegistry, ToolResult, Workspace, WorkspaceId,
+    build_charter, build_role_context, Evaluator, FakeCognitionBackend, FrameDef, LlmEvaluator,
+    ScopeKind, Snapshot, Steward, StewardId, ToolExecutor, ToolId, ToolParams, ToolRegistry,
+    ToolResult, Workspace, WorkspaceId,
 };
-use chartered_core::FakeCognitionBackend;
+use chartered_runtime::charter_loader::{load_charter_def, load_role_context_def, load_skills};
 
 fn examples_dir() -> &'static Path {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -73,7 +73,11 @@ fn load_coding_agent_charter() {
     }
 
     // scopes.md produced 4 named sections.
-    let scope_names: Vec<_> = def.charter_scopes.iter().map(|(n, _)| n.as_str()).collect();
+    let scope_names: Vec<&str> = def
+        .charter_scopes
+        .iter()
+        .map(|(n, _): &(String, String)| n.as_str())
+        .collect();
     assert!(scope_names.contains(&"file_system_access"), "names: {scope_names:?}");
     assert!(scope_names.contains(&"shell_commands"));
     assert!(scope_names.contains(&"network_access"));
@@ -94,7 +98,7 @@ fn load_coding_agent_charter() {
     // Build Charter and Workspace; validation should pass.
     let permitted = def.permitted_tools.clone();
     let charter = build_charter(def, 1, evaluator_factory());
-    let snap = Snapshot::new(charter, chartered_core::RoleContext::empty());
+    let snap = Snapshot::new(charter, chartered_core::RoleContext::empty(), Vec::new());
     let registry = registry_for(&permitted);
     let steward = Steward::new(StewardId::new("sut"), snap, Arc::new(registry));
     let _ws = Workspace::single(WorkspaceId::new("ws-coding"), steward)
@@ -118,7 +122,11 @@ fn load_customer_service_charter_with_role_context() {
     // Load Role context from the shipped template.
     let rc_path = dir.join("role_context_template.md");
     let rc_def = load_role_context_def(&rc_path).expect("load role context template");
-    let rc_names: Vec<_> = rc_def.scopes.iter().map(|(n, _)| n.as_str()).collect();
+    let rc_names: Vec<&str> = rc_def
+        .scopes
+        .iter()
+        .map(|(n, _): &(String, String)| n.as_str())
+        .collect();
     assert!(rc_names.contains(&"product_pricing_fees"), "names: {rc_names:?}");
     assert!(rc_names.contains(&"returns_warranty_policy"));
     assert!(rc_names.contains(&"service_scope_limitations"));
@@ -128,7 +136,7 @@ fn load_customer_service_charter_with_role_context() {
     let permitted = def.permitted_tools.clone();
     let charter = build_charter(def, 2, evaluator_factory());
     let role_context = build_role_context(rc_def, 5);
-    let snap = Snapshot::new(charter, role_context);
+    let snap = Snapshot::new(charter, role_context, Vec::new());
     let registry = registry_for(&permitted);
     let steward = Steward::new(StewardId::new("sut"), snap, Arc::new(registry));
     let _ws = Workspace::single(WorkspaceId::new("ws-cs"), steward)
@@ -143,7 +151,7 @@ fn workspace_validation_fails_when_role_context_omitted() {
     let def = load_charter_def(&dir).unwrap();
     let permitted = def.permitted_tools.clone();
     let charter = build_charter(def, 1, evaluator_factory());
-    let snap = Snapshot::new(charter, chartered_core::RoleContext::empty());
+    let snap = Snapshot::new(charter, chartered_core::RoleContext::empty(), Vec::new());
     let registry = registry_for(&permitted);
     let steward = Steward::new(StewardId::new("sut"), snap, Arc::new(registry));
     let err = match Workspace::single(WorkspaceId::new("ws"), steward) {
@@ -154,6 +162,71 @@ fn workspace_validation_fails_when_role_context_omitted() {
         err.0.contains("RoleContext"),
         "error did not mention RoleContext: {}",
         err.0
+    );
+}
+
+#[test]
+fn load_skills_returns_empty_when_directory_absent() {
+    // Skills are optional: a Charter without `skills/` loads as
+    // empty Vec<Skill>, not as an error.
+    let dir = tempfile::tempdir().unwrap();
+    let skills = load_skills(dir.path()).expect("load_skills tolerates missing dir");
+    assert!(skills.is_empty());
+}
+
+#[test]
+fn load_skills_reads_markdown_files_sorted_by_id() {
+    // <charter_dir>/skills/<id>.md → one Skill each. Loader sorts by id
+    // so the resulting `skills_content_hash` is filesystem-iteration
+    // order-independent.
+    let dir = tempfile::tempdir().unwrap();
+    let skills_dir = dir.path().join("skills");
+    std::fs::create_dir_all(&skills_dir).unwrap();
+    std::fs::write(skills_dir.join("triage.md"), "triage guidance body").unwrap();
+    std::fs::write(skills_dir.join("billing.md"), "billing guidance body").unwrap();
+    // A non-.md file should be ignored — only `*.md` becomes a Skill.
+    std::fs::write(skills_dir.join("notes.txt"), "should be ignored").unwrap();
+
+    let skills = load_skills(dir.path()).expect("load_skills");
+    assert_eq!(skills.len(), 2, "two .md files → two Skills");
+    assert_eq!(skills[0].id, "billing", "sorted by id");
+    assert_eq!(skills[1].id, "triage");
+    assert_eq!(skills[0].content.trim(), "billing guidance body");
+    assert_ne!(skills[0].content_hash, skills[1].content_hash);
+}
+
+#[test]
+fn skills_content_propagates_into_snapshot_id() {
+    use chartered_core::{skills_content_hash, Charter, RoleContext, Skill};
+    let mk_charter = || Charter {
+        frames: vec![],
+        permitted_tools: vec![],
+        charter_scopes: vec![],
+        behavioral_spec: String::new(),
+        charter_version: 1,
+        charter_content_hash: "c".into(),
+    };
+    let mk_rc = || RoleContext {
+        scopes: vec![],
+        role_context_version: 1,
+        role_context_content_hash: "r".into(),
+    };
+
+    // Same Charter + Role context, different Skills → different
+    // Snapshot IDs (Skills are part of the content-addressed identity).
+    let snap_no_skills = Snapshot::new(mk_charter(), mk_rc(), Vec::new());
+    let snap_with_skill = Snapshot::new(
+        mk_charter(),
+        mk_rc(),
+        vec![Skill::new("s", "skill body")],
+    );
+    assert_ne!(snap_no_skills.id, snap_with_skill.id);
+
+    // Aggregate hash of empty Skills differs from aggregate hash of any
+    // non-empty Skill set (sanity for the composition rule).
+    assert_ne!(
+        skills_content_hash(&[]),
+        skills_content_hash(&[Skill::new("s", "skill body")])
     );
 }
 

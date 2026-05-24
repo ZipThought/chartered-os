@@ -11,10 +11,10 @@ fn make_paths(workspace: &std::path::Path) -> DeploymentPaths {
     DeploymentPaths::canonicalize(workspace, &chartered).unwrap()
 }
 
-#[test]
-fn registry_builds_known_executors() {
+#[tokio::test]
+async fn registry_builds_known_executors() {
     let dir = tempfile::tempdir().unwrap();
-    let reg = ExecutorRegistry::new(make_paths(dir.path()));
+    let reg = ExecutorRegistry::new(make_paths(dir.path())).await.unwrap();
 
     let r = reg
         .build("native_fs_read", &ToolId::new("read_file"))
@@ -41,24 +41,16 @@ fn registry_builds_known_executors() {
         .expect("native_artifact_modify builds");
     assert_eq!(am.id().0, "modify_artifact");
 
-    let af = reg
-        .build(
-            "native_artifact_record_finding",
-            &ToolId::new("record_finding"),
-        )
-        .expect("native_artifact_record_finding builds");
-    assert_eq!(af.id().0, "record_finding");
-
     let al = reg
         .build("native_artifact_list", &ToolId::new("list_artifacts"))
         .expect("native_artifact_list builds");
     assert_eq!(al.id().0, "list_artifacts");
 }
 
-#[test]
-fn registry_rejects_unknown_executor() {
+#[tokio::test]
+async fn registry_rejects_unknown_executor() {
     let dir = tempfile::tempdir().unwrap();
-    let reg = ExecutorRegistry::new(make_paths(dir.path()));
+    let reg = ExecutorRegistry::new(make_paths(dir.path())).await.unwrap();
     let err = match reg.build("nonexistent_executor", &ToolId::new("x")) {
         Ok(_) => panic!("expected unknown-executor error"),
         Err(e) => e,

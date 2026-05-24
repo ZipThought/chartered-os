@@ -36,6 +36,8 @@ Forbidden: uninstructed truncation guards, fallback behaviors (see Error Discipl
 
 **Domain logic in kernel.** The kernel provides mechanisms; domain config provides policy. Hardcoded pattern-matching rules (regex for prices, substring matching for names) that encode domain concepts as kernel code = domain logic in kernel, regardless of how it's dispatched. The kernel may implement generic mechanisms (LLM judgment, registry dispatch). It MUST NOT implement domain-specific algorithms. Test: "Would this code need to change if we switched from medical CX to e-commerce?" Yes → domain logic, belongs in config or domain layer.
 
+**Transcription fidelity.** User-intent artifacts (goals, briefs, mandates, requirements) MUST contain only what the user stated. Assistant contributions during dialogue — analogies, explanations, meta-commentary, proposed extrapolations — MUST NOT enter the artifact, even when they appear to follow. Diagnostic per clause: "Did the user say this, or did I?" Latter → strike. Compression and re-ordering permitted; addition forbidden. Artifact authority comes from being the user's words, not from assistant synthesis.
+
 ### Writing Discipline
 
 **Co-location.** Concept and mechanism belong together — in specs, code, comments, docs. Separating them forces readers to hold cross-references across distant locations; readers reliably fail at this. Diagnostic: "To understand this mechanism, how many other locations must the reader hold?" More than one → co-location violation. Applies universally: spec sections co-locate concept with mechanism; code co-locates type with validation; comments co-locate with the code they govern; CONTEXT.md co-locates design intent with the subtree it governs. When modifying any artifact, if co-location violations exist in the touched scope → propose fixes.
@@ -259,9 +261,15 @@ Each status report: exact commands, exit codes, failing tests + output (quoted),
 
 Verification answers: what proposition? what source? what measurement? how does verdict follow? Any unanswered → not verification.
 
-Implementations include: static checks (lint, type checks, forbidden imports), unit tests for pure deterministic logic, integration tests with real infrastructure, assembly tests wiring several components.
+Implementations include static checks (lint, type checks, forbidden imports) and tests across three tiers — unit, integration, e2e.
 
-Mocks only for external services. Internal components → real or test-grade implementations. Every test path requiring external dependency MUST have complementary test using substitute validating same contract.
+**Unit tests.** Literally stateless. No filesystem, no env mutation, no IO, no shared in-process state across test cases. Live under `#[cfg(test)] mod tests` in the source file they exercise. Run in CI.
+
+**Integration tests.** Exercise vertical cuts across trait interface boundaries — several components wired together, observed through their declared contracts. May read or write files, but each test run owns its own isolated directory (one `tempfile::tempdir()` per test; no shared paths, no cleanup races). Live under `<crate>/tests/`. Run in CI.
+
+**E2E tests.** Exercise the actual full agent loop, require an actual LLM, and call over the production API via its proper transport protocol. Local-only — never run in CI. Each e2e test MUST be `#[ignore]`d so default `cargo test` skips it; opt-in via `cargo test -- --ignored`. The soft-skip pattern (`if !precondition { return; }`) is forbidden — it masks failure as passing (see "Tests MUST fail when preconditions absent" below).
+
+Mocks only for external services. Internal components → real or test-grade implementations (`InMemoryReceiptStore`, `FakeCognitionBackend`, …). Every test path requiring an LLM MUST have both a fake-LLM variant (queued responses, in-process) and a real-LLM variant (e2e against the production transport). The fake side covers all logic paths; the real side validates the transport, serde, and adapter canonicalization.
 
 Before any test: what requirement? what violation signal? what bugs caught? what bugs missed?
 
