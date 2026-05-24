@@ -25,9 +25,11 @@ fi
 
 for crate in "${CRATES[@]}"; do
     # `cargo clippy` is a strict superset of `cargo check`; running
-    # both would do the type-check pass twice per crate.
+    # both would do the type-check pass twice per crate. `--all-targets`
+    # extends both passes to examples and benches alongside lib/tests
+    # so example programs cannot rot under the CI gate.
     echo "=== $crate: cargo clippy ==="
-    (cd "$crate" && cargo clippy -- -D warnings)
+    (cd "$crate" && cargo clippy --all-targets -- -D warnings)
     echo "=== $crate: cargo test ==="
     (cd "$crate" && cargo test)
 done

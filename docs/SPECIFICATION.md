@@ -315,7 +315,7 @@ Versions: Role context version increments on Professional edit; Charter version 
 
 ## The Runtime
 
-Per-deployment Runtime hosts the Actor's loop, runs the Gate, dispatches Tools, writes Receipts. Configuration enters at startup from `.chartered/` (walk-up search, then `~/.chartered/` fallback):
+Per-deployment Runtime hosts the Actor's loop, runs the Gate, dispatches Tools, writes Receipts. It is both a binary entry and a library type embeddable in a host process; the chartered boundary is the same in either form, and the Receipt trail is the same artifact. Configuration enters at startup from `.chartered/` (walk-up search, then `~/.chartered/` fallback):
 
 - `chartered.toml` — runtime-level: enforcement level, log level, Receipt store backend.
 - `steward.toml` — Steward-level: per-role model selection (Actor, Evaluator), system prompt, Tool registry references.
@@ -375,13 +375,27 @@ Actor-side cognition instrumentation following the SKILL.md convention. The Acto
 
 ## Subagents
 
-A Steward may spawn a subagent via a tool call. The spawn proposal crosses the Gate like any other tool call; the spawned subagent runs its own loop with its own Snapshot, and every tool call inside the subagent's loop crosses its own Gate. Subagents do not constitute a new governance surface — they are recursive instances of the existing one.
+A Steward may spawn a subagent via a tool call. When the subagent is itself a Steward — its own Charter, its own Snapshot — the spawn proposal crosses the Gate like any other tool call, and every tool call inside the subagent's loop crosses its own Gate. A Steward may also invoke an ungoverned helper — cognition that produces an artifact the Steward then evaluates before proposing any Tool call of its own. Either form composes recursively (see *The Chartered Boundary*); in neither case does the subagent constitute a new governance surface beyond the boundaries already declared.
+
+---
+
+## The Chartered Boundary
+
+Governance is a property applied per-invocation, not a layer in the agent topology. The Runtime is the surface across which the property is asserted: cognition that enters through the Runtime is governed (Charter-bound, Gate-evaluated, Receipt-trailed, Snapshot-bound, refinement-budgeted); cognition that never enters is not. Both are agents; the shape is the same. The distinction is whether each invocation crosses the Runtime.
+
+Agents compose freely. An ungoverned agent may invoke a Steward through the Runtime; a Steward may invoke an ungoverned helper for cognition that produces an artifact the Steward then evaluates before any Tool call; either may invoke another of either kind, to any depth (see *Subagents* for the recursive-Steward special case). The boundary is per-invocation, not per-agent and not per-process.
+
+**Restraint as default.** The Tool ABI is asymmetric: `read_artifact`, `list_artifacts`, `query_artifact`, `subscribe_artifact`, `cite_artifact`, `attest_artifact`, `ask_question` produce no externally observable effect on their own. Only `modify_artifact` against an externally-visible ArtifactBackend (`kind=channel`, `kind=file`, `kind=service`) externalizes. A governed loop iterates its inner cognition, consults Scopes, records observations, proposes Tool calls — most of which are internal-only. The Gate enforces that any externalization requires affirmative Charter license; the absence of license is silence, not failure (see *Default Deny*).
+
+An agent participating in a populated environment (a channel of messages, a stream of documents, a workflow queue) under governance behaves entirely differently from the same agent without governance: the governed loop fires per event but rarely surfaces an externally visible action; the ungoverned loop fires per event and externalizes per iteration. Same machinery, same model, different posture.
+
+**Observability.** Each Runtime invocation is one boundary crossing. The Receipt trail records every governed action; the absence of Receipts in a window records every ungoverned interval. Inspecting whether a particular agent at a particular time was operating under governance is a question with a definite answer.
 
 ---
 
 ## User-Facing Integration Boundary
 
-The agent is never the primary UI. Product UIs that consume CharteredOS deployments interact with the Runtime, not with the Actor's cognition. The user does not see the agent; the user sees product surfaces backed by Receipt-governed effects.
+The agent is never the primary UI. Product UIs that consume CharteredOS deployments interact with the Runtime, not with the Actor's cognition. The user does not see the agent; the user sees product surfaces backed by Receipt-governed effects. This is one instance of *The Chartered Boundary*; the UI layer is the consumer that invokes the Runtime.
 
 ---
 

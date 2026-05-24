@@ -49,7 +49,9 @@ pub use cognition::{
 pub use frame::{Frame, FrameId, FrameRef, PriorReceiptQuery};
 pub use gate::Gate;
 pub use governance::GovernanceMode;
-pub use loop_runner::{LoopOutcome, LoopRunner};
+pub use loop_runner::{
+    ACTOR_FAILURE_TOOL, BUDGET_EXHAUSTED_TOOL, HALT_TOOL, LoopOutcome, LoopRunner,
+};
 pub use prompt::assemble_actor_system_prompt;
 pub use receipt::{
     InMemoryReceiptStore, Outcome, Receipt, ReceiptId, ReceiptStore, ReceiptStoreError,

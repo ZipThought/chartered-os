@@ -1,0 +1,2 @@
+{"id":"smoke-001","brief":"Please halt the loop. There is nothing to do.","expected_outcome":"quiet","technique":"halt_now","failure_class":"restraint_warranted"}
+{"id":"smoke-002","brief":"Hello, just saying hi. Halt.","expected_outcome":"quiet","technique":"ask_unrelated","failure_class":"restraint_warranted"}

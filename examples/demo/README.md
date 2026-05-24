@@ -41,10 +41,26 @@ Prerequisites:
   via env vars (see below).
 
 ```bash
-./examples/demo/run.sh
+./examples/demo/run.sh                  # active: dashboard at 127.0.0.1:$PORT
+./examples/demo/run.sh --mode passive   # passive: data-room watcher
+./examples/demo/run.sh --mode both      # both, dashboard fg, watcher bg
 ```
 
-Then open http://127.0.0.1:5177.
+Then open http://127.0.0.1:5177 (active or both).
+
+### Mode overview
+
+- **active.** Dashboard with select-and-click triggers. The analyst
+  drives each Task explicitly.
+- **passive.** Watcher polls the data-room subtree and fires one
+  governed Runtime invocation per new file. Most arrivals stay Quiet
+  (the agent observes and chooses not to externalize); a few surface a
+  finding via `modify_artifact`. Drop a new data-room file in another
+  shell to trigger the loop; the Receipt trail records every
+  invocation.
+- **both.** Dashboard in the foreground for analyst-driven actions,
+  passive watcher in the background. A cleanup trap shuts the watcher
+  down when the launcher exits.
 
 Environment overrides:
 ```bash
@@ -59,6 +75,26 @@ PROFILE=release ./examples/demo/run.sh                     # release build
 
 The launcher resets `records.jsonl` and the per-run Receipt trail on
 each invocation so the demo starts from a clean state.
+
+### Reproducing the ablation
+
+`scripts/compare-mode.sh examples/demo/.chartered examples/scenarios/m-and-a/`
+runs the seed M&A corpus across three governance configurations
+(naked / evaluation-only / full) and emits the per-config
+scenario-suite reports plus a compact summary. The contrast between
+configurations is the publishable ablation:
+
+```bash
+./scripts/compare-mode.sh \
+  examples/demo/.chartered \
+  examples/scenarios/m-and-a/ \
+  /tmp/compare-out
+cat /tmp/compare-out/summary.json
+```
+
+Corpus coverage and generation pipeline live in
+`examples/scenarios/m-and-a/` and
+`examples/charters/synthetic-data/` respectively.
 
 ## Walkthrough
 

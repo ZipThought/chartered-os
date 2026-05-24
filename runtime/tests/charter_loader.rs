@@ -230,3 +230,54 @@ fn skills_content_propagates_into_snapshot_id() {
     );
 }
 
+
+#[test]
+fn load_synthetic_data_charter() {
+    let dir = examples_dir().join("examples/charters/synthetic-data");
+    let def = load_charter_def(&dir).expect("load synthetic-data");
+    assert_eq!(def.permitted_tools.len(), 1);
+    assert_eq!(def.permitted_tools[0].0, "modify_artifact");
+    assert_eq!(def.frames.len(), 5);
+    let ids: Vec<&str> = def.frames.iter().map(|f| f.id.0.as_str()).collect();
+    for required in [
+        "no_real_world_likeness",
+        "scenario_novelty",
+        "technique_coverage",
+        "failure_class_discipline",
+        "claimed_label_explicit",
+    ] {
+        assert!(
+            ids.contains(&required),
+            "Frame `{required}` missing; found: {ids:?}"
+        );
+    }
+}
+
+#[test]
+fn load_gold_labeler_charter() {
+    let dir = examples_dir().join("examples/charters/gold-labeler");
+    let def = load_charter_def(&dir).expect("load gold-labeler");
+    assert_eq!(def.permitted_tools.len(), 1);
+    assert_eq!(def.permitted_tools[0].0, "modify_artifact");
+    assert_eq!(def.frames.len(), 3);
+    let ids: Vec<&str> = def.frames.iter().map(|f| f.id.0.as_str()).collect();
+    for required in [
+        "judgment_traceable_to_scope",
+        "label_uses_charter_frames",
+        "blinding_from_generator_claim",
+    ] {
+        assert!(ids.contains(&required), "Frame `{required}` missing; found: {ids:?}");
+    }
+}
+
+#[test]
+fn load_same_context_baseline_charter() {
+    let dir = examples_dir().join("examples/charters/same-context-baseline");
+    let def = load_charter_def(&dir).expect("load same-context-baseline");
+    // The strawman has no Frames — every proposal is OUT_OF_SCOPE; the
+    // harness pairs it with passthrough mode.
+    assert!(def.frames.is_empty());
+    // Several permitted tools so the strawman can stand in for any
+    // production Charter the harness contrasts it against.
+    assert!(def.permitted_tools.len() >= 4);
+}
